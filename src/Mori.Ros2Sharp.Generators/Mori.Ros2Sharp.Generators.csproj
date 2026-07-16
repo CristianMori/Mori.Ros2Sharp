@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Mori.Ros2Sharp.Generators</RootNamespace>
+
+    <!-- Not packaged on its own: the built analyzer ships inside the Mori.Ros2Sharp package
+         (analyzers/dotnet/cs), so one PackageReference brings runtime + codegen. -->
+    <IsPackable>false</IsPackable>
+    <!-- RS1036/RS2008: analyzer release tracking and extended rules are for standalone
+         analyzer packages; this generator ships bundled and versions with the library. -->
+    <NoWarn>$(NoWarn);RS1036;RS2008</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
+    <Compile Include="..\..\shared\*.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+</Project>

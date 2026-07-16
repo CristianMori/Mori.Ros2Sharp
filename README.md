@@ -20,6 +20,7 @@ package, `new Ros2Node(...)`, and the process shows up on the ROS graph like any
 | **Pub/sub** | Reliable and best-effort writers and readers: bounded history, HEARTBEAT/ACKNACK retransmission, GAP handling, duplicate suppression |
 | **Graph** | `ros_discovery_info` participation — the node appears in `ros2 node list`, its topics in `ros2 topic list` |
 | **Services** | Both sides: serve a service that `ros2 service call` can invoke, or call an existing ROS 2 service, with request/response correlation |
+| **Codegen** | Typed message classes generated from `.msg` files — a bundled build-time source generator and the `ros2msggen` CLI, with the common interface packages embedded |
 
 Interoperability is validated live against unmodified ROS 2 Humble nodes (Fast DDS, the
 default middleware): `ros2 topic echo` prints what this library publishes, subscriptions
@@ -82,9 +83,34 @@ request.Write(true);
 byte[] response = await client.CallAsync(request.ToArray(), TimeSpan.FromSeconds(5));
 ```
 
-Message bodies are hand-serialized with `CdrWriter`/`CdrReader` for now — fields in
-declaration order, primitives aligned automatically. Code generation from `.msg` files is the
-next planned layer.
+Message bodies can be hand-serialized with `CdrWriter`/`CdrReader` as above — fields in
+declaration order, primitives aligned automatically — or generated. Add `.msg` files to your
+project as `AdditionalFiles` and the bundled source generator turns them into typed classes at
+build time, dependencies included (the common interface packages — `builtin_interfaces`,
+`std_msgs`, `geometry_msgs`, `sensor_msgs`, `nav_msgs`, `tf2_msgs` — are embedded, so
+referencing `std_msgs/Header` just works):
+
+```xml
+<ItemGroup>
+  <AdditionalFiles Include="msgs/**/*.msg" />
+</ItemGroup>
+```
+
+```csharp
+var twist = new Ros2Messages.geometry_msgs.Twist();
+twist.Linear.X = 0.25;
+pub.Write(twist.ToBytes());   // CDR, encapsulation included
+
+var back = Ros2Messages.geometry_msgs.Twist.FromBytes(payload);
+```
+
+Generated classes carry `RosType`/`DdsType` constants, apply `.msg` field defaults, enforce
+fixed array lengths, and round-trip byte-identically with every DDS implementation tested.
+The same emitter is available as a CLI for offline generation:
+
+```
+ros2msggen -o Generated -n MyMessages path/to/my_package/msg
+```
 
 For DDS-level work (custom QoS combinations, non-ROS DDS systems, protocol experiments),
 `RtpsParticipant` exposes the layer underneath: raw reader/writer endpoints, discovery events,
@@ -124,6 +150,8 @@ the same mechanism DDS initial-peer lists use.
   (roughly 60 KB).
 - **Type descriptions**: endpoint matching is by topic and type name, which is how ROS 2
   Humble matches. The newer type-hash system is not implemented.
+- **.msg grammar**: constants, defaults, bounded strings/arrays, and nested messages are
+  supported; `wstring` fields and array default values are not.
 
 ## Building
 

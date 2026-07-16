@@ -6,11 +6,37 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Mori.Ros2Sharp</RootNamespace>
+
+    <PackageId>Mori.Ros2Sharp</PackageId>
     <Version>0.1.0</Version>
+    <Description>A ROS 2 node in pure managed C#: DDS-RTPS discovery, reliable pub/sub, graph participation, and services, implemented directly on raw UDP sockets with OMG CDR serialization — plus .msg-driven code generation via a bundled source generator. No native DDS libraries, no bridge, no ROS installation required.</Description>
     <Authors>Cristian Mori</Authors>
     <Copyright>© 2026 Cristian Mori</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageTags>ros;ros2;dds;rtps;cdr;robotics</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591: the CdrWriter/CdrReader primitive overloads are self-describing. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <!-- The .msg parser and C# emitter are shared source with the generator tools (which cannot
+         reference a net8.0 assembly), so they are compiled into each project from shared\. -->
+    <Compile Include="..\..\shared\*.cs" LinkBase="Msg" />
+  </ItemGroup>
+
+  <!-- The source generator ships inside this package (analyzers/, next to lib/): one
+       PackageReference brings the runtime and build-time .msg codegen together. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Mori.Ros2Sharp.Generators\Mori.Ros2Sharp.Generators.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="..\Mori.Ros2Sharp.Generators\bin\$(Configuration)\netstandard2.0\Mori.Ros2Sharp.Generators.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="..\Mori.Ros2Sharp.Generators\buildTransitive\Mori.Ros2Sharp.Generators.props"
+          Pack="true" PackagePath="buildTransitive/Mori.Ros2Sharp.props" />
+  </ItemGroup>
 
   <!-- Intentionally dependency-free and cross-platform: a ROS 2 node is DDS-RTPS over UDP plus
        CDR serialization, implemented here on raw sockets. -->
