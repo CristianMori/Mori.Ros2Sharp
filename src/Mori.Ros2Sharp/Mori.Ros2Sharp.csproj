@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Mori.Ros2Sharp</RootNamespace>
+    <Version>0.1.0</Version>
+    <Authors>Cristian Mori</Authors>
+    <Copyright>© 2026 Cristian Mori</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <!-- Intentionally dependency-free and cross-platform: a ROS 2 node is DDS-RTPS over UDP plus
+       CDR serialization, implemented here on raw sockets. -->
+
+</Project>
