@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -11,7 +11,10 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>ros2msggen</ToolCommandName>
     <PackageId>Mori.Ros2Sharp.MsgGen</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
+    <PackageProjectUrl>https://github.com/CristianMori/Mori.Ros2Sharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/CristianMori/Mori.Ros2Sharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <Authors>Cristian Mori</Authors>
     <Copyright>© 2026 Cristian Mori</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
