@@ -39,6 +39,53 @@ public sealed class RtpsParticipant : IDisposable
     /// <summary>Opaque USER_DATA carried in our SPDP announcement (ROS 2 puts "enclave=…;" here).</summary>
     public byte[]? UserData { get; set; }
 
+    /// <summary>
+    /// The largest datagram we send. Fast DDS drops anything over 65,500 bytes, so this stays
+    /// below that with room for the per-datagram submessage overhead.
+    /// </summary>
+    public const int MaxDatagramSize = 65_000;
+
+    // RTPS header + INFO_DST + INFO_TS + the DATA_FRAG prologue and an inline-QoS related
+    // identity, rounded up: what a datagram spends before the first payload byte.
+    internal const int DatagramOverhead = 128;
+
+    private int _fragmentSize = 64_000;
+
+    /// <summary>
+    /// The fragment size used when a sample does not fit one datagram. The default matches
+    /// Fast DDS and is accepted by Cyclone DDS as well; a value around 1,400 keeps every
+    /// datagram under the Ethernet MTU for links where IP fragmentation is a problem.
+    /// Clamped so one fragment always fits a datagram.
+    /// </summary>
+    public int FragmentSize
+    {
+        get => _fragmentSize;
+        set => _fragmentSize = Math.Clamp(value, 1024, MaxDatagramSize - DatagramOverhead);
+    }
+
+    /// <summary>The largest payload that still goes out as a single DATA submessage.</summary>
+    internal int MaxUnfragmentedPayload => MaxDatagramSize - DatagramOverhead;
+
+    /// <summary>
+    /// The local addresses advertised in our locators, or null to choose automatically: the
+    /// address that routes to each configured peer first, then the multicast route, then the
+    /// remaining non-link-local addresses, capped at <see cref="MaxAdvertisedAddresses"/>.
+    /// Set this on hosts with many virtual adapters when the automatic choice is wrong.
+    /// </summary>
+    public IReadOnlyList<IPAddress>? AdvertisedAddresses { get; set; }
+
+    /// <summary>
+    /// How many unicast addresses we advertise at most. Fast DDS keeps only the first four
+    /// unicast locators of a remote participant by default, so a longer list can push the
+    /// one usable address out of the set the peer actually sends to.
+    /// </summary>
+    public const int MaxAdvertisedAddresses = 4;
+
+    // Test hooks: return true to drop the datagram. The probe uses them to simulate loss and
+    // exercise the retransmission paths without a lossy network.
+    internal Func<byte[], bool>? DropOutgoing;
+    internal Func<byte[], bool>? DropIncoming;
+
     /// <summary>Raised the first time a remote participant is heard.</summary>
     public event Action<ParticipantData, IPEndPoint>? ParticipantDiscovered;
 
@@ -50,6 +97,12 @@ public sealed class RtpsParticipant : IDisposable
 
     /// <summary>Raised for every remote subscription learned through SEDP.</summary>
     public event Action<EndpointData>? SubscriptionDiscovered;
+
+    /// <summary>
+    /// Raised when handling a received datagram threw. The receive loop carries on regardless;
+    /// this exists so such failures are visible instead of silently dropping traffic.
+    /// </summary>
+    public event Action<Exception>? ReceiveError;
 
     public RtpsParticipant(int domainId = 0, string? name = null)
     {
@@ -115,7 +168,11 @@ public sealed class RtpsParticipant : IDisposable
         get { lock (_remote) return _remote.Values.ToList(); }
     }
 
-    /// <summary>Creates a writer and announces it through SEDP. Names are DDS-level (see <see cref="Ros2Names"/>).</summary>
+    /// <summary>
+    /// Creates a writer and announces it through SEDP. Names are DDS-level (see <see cref="Ros2Names"/>).
+    /// A transient-local writer replays its history (the last <paramref name="historyDepth"/>
+    /// samples) to readers that match later — the DDS form of a latched topic.
+    /// </summary>
     public RtpsWriterEndpoint CreateWriter(string topicName, string typeName,
         bool reliable = true, bool transientLocal = false, int historyDepth = 32)
     {
@@ -126,27 +183,37 @@ public sealed class RtpsParticipant : IDisposable
         lock (_remotePublications)
             subs = _remoteSubscriptions.Values.Where(s => s.TopicName == topicName && s.TypeName == typeName).ToList();
         foreach (var s in subs)
-            if (!s.Reliable || reliable)
-                writer.MatchReader(s.Guid, ResolveLocators(s));
+            if (QosCompatible(reliable, transientLocal, s.Reliable, s.TransientLocal))
+                writer.MatchReader(s.Guid, ResolveLocators(s), s.TransientLocal);
         _sedpPublicationsWriter.Write(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal).Encode());
         return writer;
     }
 
-    /// <summary>Creates a reader and announces it through SEDP. Names are DDS-level (see <see cref="Ros2Names"/>).</summary>
-    public RtpsReaderEndpoint CreateReader(string topicName, string typeName, bool reliable = true)
+    /// <summary>
+    /// Creates a reader and announces it through SEDP. Names are DDS-level (see <see cref="Ros2Names"/>).
+    /// A transient-local reader only matches transient-local writers, and receives what they
+    /// wrote before it existed.
+    /// </summary>
+    public RtpsReaderEndpoint CreateReader(string topicName, string typeName, bool reliable = true, bool transientLocal = false)
     {
         var guid = new RtpsGuid(Guid.Prefix, new EntityId((uint)(Interlocked.Increment(ref _entityKey) << 8) | 0x04));
-        var reader = new RtpsReaderEndpoint(this, guid, topicName, typeName, reliable);
+        var reader = new RtpsReaderEndpoint(this, guid, topicName, typeName, reliable, transientLocal);
         List<EndpointData> pubs;
         lock (_readers) _readers.Add(reader);
         lock (_remotePublications)
             pubs = _remotePublications.Values.Where(p => p.TopicName == topicName && p.TypeName == typeName).ToList();
         foreach (var p in pubs)
-            if (p.Reliable || !reliable)
+            if (QosCompatible(p.Reliable, p.TransientLocal, reliable, transientLocal))
                 reader.MatchWriter(p.Guid, ResolveLocators(p));
-        _sedpSubscriptionsWriter.Write(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal: false).Encode());
+        _sedpSubscriptionsWriter.Write(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal).Encode());
         return reader;
     }
+
+    // The DDS request/offer rule for the two QoS we implement: a reader may not ask for more
+    // than the writer offers. Reliable readers need reliable writers; transient-local readers
+    // need transient-local writers. The other direction is always fine.
+    private static bool QosCompatible(bool writerReliable, bool writerTransientLocal, bool readerReliable, bool readerTransientLocal) =>
+        (writerReliable || !readerReliable) && (writerTransientLocal || !readerTransientLocal);
 
     public void Dispose()
     {
@@ -166,10 +233,8 @@ public sealed class RtpsParticipant : IDisposable
         w.AddDisposeData(EntityId.SpdpReader, EntityId.SpdpWriter, Interlocked.Increment(ref _spdpSequence), Guid);
         byte[] datagram = w.ToArray();
 
-        var targets = new List<IPEndPoint>
-        {
-            new(RtpsPorts.DiscoveryMulticastGroup, RtpsPorts.MetatrafficMulticast(DomainId)),
-        };
+        SendMulticast(datagram);
+        var targets = new List<IPEndPoint>();
         lock (_peers)
             foreach (var peer in _peers)
                 for (int pid = 0; pid < 4; pid++)
@@ -192,10 +257,12 @@ public sealed class RtpsParticipant : IDisposable
         w.AddInfoDestination(destination);
         build(w);
         byte[] datagram = w.ToArray();
+        if (DropOutgoing?.Invoke(datagram) == true) return;
         foreach (var ep in targets)
         {
             try { _meta.Client.SendTo(datagram, ep); }
             catch (SocketException) { }
+            catch (ObjectDisposedException) { return; } // disposed while a resend was under way
         }
     }
 
@@ -203,6 +270,10 @@ public sealed class RtpsParticipant : IDisposable
     {
         var udp = new UdpClient();
         if (reuse) udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        // A fragmented sample arrives as a burst of near-64 KB datagrams; the OS default
+        // buffers (64 KB on Windows) would drop most of it before we ever read it.
+        try { udp.Client.ReceiveBufferSize = 4 << 20; } catch (SocketException) { }
+        try { udp.Client.SendBufferSize = 4 << 20; } catch (SocketException) { }
         if (OperatingSystem.IsWindows())
         {
             // SIO_UDP_CONNRESET off: an ICMP port-unreachable from one peer must not fault
@@ -214,8 +285,46 @@ public sealed class RtpsParticipant : IDisposable
         return udp;
     }
 
-    // Every up, non-loopback IPv4 address: these all go into our advertised locators, because
-    // we cannot know which of them a given remote can route back to.
+    // The addresses that go into our advertised locators, most likely to be reachable first.
+    // A host with VPN, container, and hypervisor adapters can have a dozen addresses, and a
+    // peer that only honors the first few must see the right one among them.
+    private IReadOnlyList<IPAddress> AdvertisedLocalAddresses()
+    {
+        if (AdvertisedAddresses is { Count: > 0 } chosen) return chosen;
+        var ordered = new List<IPAddress>();
+        void Add(IPAddress? ip)
+        {
+            if (ip != null && !ip.Equals(IPAddress.Any) && !ordered.Contains(ip)) ordered.Add(ip);
+        }
+        lock (_peers)
+            foreach (var peer in _peers)
+                Add(RouteSource(peer));
+        Add(RouteSource(RtpsPorts.DiscoveryMulticastGroup));
+        foreach (var ip in LocalAddresses())
+            if (!IsLinkLocal(ip))
+                Add(ip);
+        return ordered.Count > MaxAdvertisedAddresses ? ordered.GetRange(0, MaxAdvertisedAddresses) : ordered;
+    }
+
+    // The local address the routing table would use to reach the target (no packet is sent).
+    private static IPAddress? RouteSource(IPAddress target)
+    {
+        try
+        {
+            using var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            s.Connect(target, 7400);
+            return (s.LocalEndPoint as IPEndPoint)?.Address;
+        }
+        catch (SocketException) { return null; }
+    }
+
+    private static bool IsLinkLocal(IPAddress ip)
+    {
+        byte[] b = ip.GetAddressBytes();
+        return b.Length == 4 && b[0] == 169 && b[1] == 254;
+    }
+
+    // Every up, non-loopback IPv4 address: the multicast group is joined on each of them.
     private static IEnumerable<IPAddress> LocalAddresses()
     {
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
@@ -270,7 +379,7 @@ public sealed class RtpsParticipant : IDisposable
             EntityName = Name,
             UserData = UserData,
         };
-        foreach (var ip in LocalAddresses())
+        foreach (var ip in AdvertisedLocalAddresses())
         {
             data.MetatrafficUnicastLocators.Add(Locator.UdpV4(ip, RtpsPorts.MetatrafficUnicast(DomainId, ParticipantId)));
             data.DefaultUnicastLocators.Add(Locator.UdpV4(ip, RtpsPorts.DefaultUnicast(DomainId, ParticipantId)));
@@ -292,7 +401,7 @@ public sealed class RtpsParticipant : IDisposable
             Reliable = reliable,
             TransientLocal = transientLocal,
         };
-        foreach (var ip in LocalAddresses())
+        foreach (var ip in AdvertisedLocalAddresses())
             e.UnicastLocators.Add(Locator.UdpV4(ip, RtpsPorts.DefaultUnicast(DomainId, ParticipantId)));
         return e;
     }
@@ -336,10 +445,8 @@ public sealed class RtpsParticipant : IDisposable
         w.AddData(EntityId.SpdpReader, EntityId.SpdpWriter, ++_spdpSequence, BuildLocalData().Encode());
         byte[] datagram = w.ToArray();
 
-        var targets = new List<IPEndPoint>
-        {
-            new(RtpsPorts.DiscoveryMulticastGroup, RtpsPorts.MetatrafficMulticast(DomainId)),
-        };
+        SendMulticast(datagram);
+        var targets = new List<IPEndPoint>();
         lock (_peers)
         {
             // The first few participant slots per peer host, as DDS initial-peer lists do.
@@ -355,6 +462,26 @@ public sealed class RtpsParticipant : IDisposable
         }
     }
 
+    /// <summary>
+    /// Sends one datagram to the discovery multicast group once per local interface. A
+    /// single send would leave through the default route only, which on a host with VPN or
+    /// virtual adapters is rarely the interface the other participants are on.
+    /// </summary>
+    private void SendMulticast(byte[] datagram)
+    {
+        var group = new IPEndPoint(RtpsPorts.DiscoveryMulticastGroup, RtpsPorts.MetatrafficMulticast(DomainId));
+        foreach (var ip in LocalAddresses())
+        {
+            try
+            {
+                _meta.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, ip.GetAddressBytes());
+                _meta.Client.SendTo(datagram, group);
+            }
+            catch (SocketException) { }
+            catch (ObjectDisposedException) { return; }
+        }
+    }
+
     // One loop per socket (metatraffic unicast, user unicast, discovery multicast). Socket
     // errors on individual datagrams must never end the loop; only cancellation/dispose does.
     private async Task ReceiveLoop(UdpClient udp)
@@ -366,8 +493,9 @@ public sealed class RtpsParticipant : IDisposable
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
             catch (SocketException) { continue; }
+            if (DropIncoming?.Invoke(r.Buffer) == true) continue;
             try { Handle(r.Buffer, r.RemoteEndPoint); }
-            catch { /* a malformed datagram must not kill the loop */ }
+            catch (Exception ex) { ReceiveError?.Invoke(ex); } // a bad datagram must not kill the loop
         }
     }
 
@@ -381,22 +509,36 @@ public sealed class RtpsParticipant : IDisposable
         if (!RtpsMessage.TryParse(datagram, out var msg) || msg!.Source == Guid.Prefix) return;
         if (msg.Destination is { } dst && dst != default(GuidPrefix) && dst != Guid.Prefix) return;
 
+        // Every reader that matches the writer gets the sample: a DATA addressed to one reader
+        // (readerId set) is taken by that reader alone, a broadcast one (readerId unknown) by
+        // all of them — two subscriptions to one topic in one participant are both served.
         foreach (var d in msg.Data)
         {
             if (d.WriterId == EntityId.SpdpWriter) { HandleSpdp(d, from); continue; }
             foreach (var r in AllReaders())
-                if (r.OnData(msg.Source, d))
-                    break;
+                r.OnData(msg.Source, d);
+        }
+        foreach (var f in msg.DataFrags)
+        {
+            if (f.WriterId == EntityId.SpdpWriter) continue; // announcements are never fragmented
+            foreach (var r in AllReaders())
+                r.OnDataFrag(msg.Source, f);
         }
         foreach (var hb in msg.Heartbeats)
             foreach (var r in AllReaders())
                 r.OnHeartbeat(msg.Source, hb);
+        foreach (var hf in msg.HeartbeatFrags)
+            foreach (var r in AllReaders())
+                r.OnHeartbeatFrag(msg.Source, hf);
         foreach (var gap in msg.Gaps)
             foreach (var r in AllReaders())
                 r.OnGap(msg.Source, gap);
         foreach (var an in msg.AckNacks)
             foreach (var w in AllWriters())
                 w.OnAckNack(msg.Source, an);
+        foreach (var nf in msg.NackFrags)
+            foreach (var w in AllWriters())
+                w.OnNackFrag(msg.Source, nf);
     }
 
     /// <summary>A remote SPDP sample: a fresh/refreshed announcement, or a departure dispose.</summary>
@@ -436,10 +578,11 @@ public sealed class RtpsParticipant : IDisposable
         if (meta.Count == 0) return;
         var be = pd.BuiltinEndpoints;
         var prefix = pd.Guid.Prefix;
+        // The SEDP builtin readers are transient-local by specification.
         if (be.HasFlag(BuiltinEndpoints.PublicationsDetector))
-            _sedpPublicationsWriter.MatchReader(new RtpsGuid(prefix, EntityId.SedpPublicationsReader), meta);
+            _sedpPublicationsWriter.MatchReader(new RtpsGuid(prefix, EntityId.SedpPublicationsReader), meta, readerTransientLocal: true);
         if (be.HasFlag(BuiltinEndpoints.SubscriptionsDetector))
-            _sedpSubscriptionsWriter.MatchReader(new RtpsGuid(prefix, EntityId.SedpSubscriptionsReader), meta);
+            _sedpSubscriptionsWriter.MatchReader(new RtpsGuid(prefix, EntityId.SedpSubscriptionsReader), meta, readerTransientLocal: true);
         if (be.HasFlag(BuiltinEndpoints.PublicationsAnnouncer))
             _sedpPublicationsReader.MatchWriter(new RtpsGuid(prefix, EntityId.SedpPublicationsWriter), meta);
         if (be.HasFlag(BuiltinEndpoints.SubscriptionsAnnouncer))
@@ -456,7 +599,7 @@ public sealed class RtpsParticipant : IDisposable
             matches = _readers.Where(r => r.TopicName == e.TopicName && r.TypeName == e.TypeName).ToList();
         var locators = ResolveLocators(e);
         foreach (var r in matches)
-            if (e.Reliable || !r.Reliable) // a reliable reader cannot use a best-effort writer
+            if (QosCompatible(e.Reliable, e.TransientLocal, r.Reliable, r.TransientLocal))
                 r.MatchWriter(e.Guid, locators);
         PublicationDiscovered?.Invoke(e);
     }
@@ -471,8 +614,8 @@ public sealed class RtpsParticipant : IDisposable
             matches = _writers.Where(w => w.TopicName == e.TopicName && w.TypeName == e.TypeName).ToList();
         var locators = ResolveLocators(e);
         foreach (var w in matches)
-            if (!e.Reliable || w.Reliable) // a reliable reader cannot use a best-effort writer
-                w.MatchReader(e.Guid, locators);
+            if (QosCompatible(w.Reliable, w.TransientLocal, e.Reliable, e.TransientLocal))
+                w.MatchReader(e.Guid, locators, e.TransientLocal);
         SubscriptionDiscovered?.Invoke(e);
     }
 

@@ -130,6 +130,68 @@ internal static class SelfTest
             msg4!.Data[0].RelatedGuid == requester && msg4.Data[0].RelatedSn == 5 &&
             msg4.Data[0].SequenceNumber == 9 && msg4.Data[0].Payload.AsSpan().SequenceEqual(payload));
 
+        // Fragment submessages through the framing. DATA_FRAG flags differ from DATA: 0x01
+        // endian, 0x02 inline QoS, and no data-present bit.
+        var fragReader = new EntityId(0x00000204);
+        var fragWriter = new EntityId(0x00000103);
+        byte[] big = new byte[10_000];
+        new Random(1).NextBytes(big);
+        var mw5 = new RtpsMessageWriter(pd.Guid.Prefix);
+        mw5.AddDataFrag(fragReader, fragWriter, 11, fragmentStartingNum: 3, fragmentsInSubmessage: 2,
+            fragmentSize: 3000, sampleSize: 10_000, big.AsSpan(6000, 4000), requester, 5);
+        mw5.AddHeartbeatFrag(fragReader, fragWriter, 11, 4, 9);
+        mw5.AddNackFrag(fragReader, fragWriter, 11, 2, new uint[] { 2, 4, 300 }, 6);
+        byte[] dg5 = mw5.ToArray();
+        Check("data_frag id and flags", dg5[20] == 0x16 && dg5[21] == 0x03);
+        Check("data_frag parse", RtpsMessage.TryParse(dg5, out var msg5) && msg5!.DataFrags.Count == 1);
+        var df = msg5!.DataFrags[0];
+        Check("data_frag header round-trip",
+            df.ReaderId == fragReader && df.WriterId == fragWriter && df.SequenceNumber == 11 &&
+            df.FragmentStartingNum == 3 && df.FragmentsInSubmessage == 2 && df.FragmentSize == 3000 &&
+            df.SampleSize == 10_000);
+        Check("data_frag bytes trimmed to sample end",
+            df.Fragments.Length == 4000 && df.Fragments.AsSpan().SequenceEqual(big.AsSpan(6000, 4000)));
+        Check("data_frag inline qos", df.RelatedGuid == requester && df.RelatedSn == 5);
+        Check("heartbeat_frag round-trip",
+            msg5.HeartbeatFrags.Count == 1 && msg5.HeartbeatFrags[0].SequenceNumber == 11 &&
+            msg5.HeartbeatFrags[0].LastFragmentNum == 4 && msg5.HeartbeatFrags[0].Count == 9);
+        Check("nack_frag round-trip (256-bit window)",
+            msg5.NackFrags.Count == 1 && msg5.NackFrags[0].SequenceNumber == 11 &&
+            msg5.NackFrags[0].Missing.SequenceEqual(new uint[] { 2, 4 }) && msg5.NackFrags[0].Count == 6);
+
+        // Reassembly: fragments out of order, duplicated, and interleaved between two samples;
+        // the second sample has an odd size so its last fragment is short and unaligned.
+        var fragWriterGuid = new RtpsGuid(pd.Guid.Prefix, fragWriter);
+        var reader = new RtpsReaderEndpoint(null!, new RtpsGuid(GuidPrefix.NewUnique(), fragReader), "t", "T", reliable: true);
+        reader.MatchWriter(fragWriterGuid, Array.Empty<IPEndPoint>());
+        var delivered = new List<(long Sn, byte[] Payload)>();
+        reader.SampleReceived += (_, d) => delivered.Add((d.SequenceNumber, d.Payload));
+        byte[] odd = new byte[7_777];
+        new Random(2).NextBytes(odd);
+        RtpsDataFrag Frag(long sn, byte[] sample, uint start, ushort count)
+        {
+            var fw = new RtpsMessageWriter(pd.Guid.Prefix);
+            int off = (int)(start - 1) * 3000;
+            int len = Math.Min(count * 3000, sample.Length - off);
+            fw.AddDataFrag(fragReader, fragWriter, sn, start, count, 3000, (uint)sample.Length, sample.AsSpan(off, len));
+            RtpsMessage.TryParse(fw.ToArray(), out var fm);
+            return fm!.DataFrags[0];
+        }
+        Check("frag: unmatched writer ignored", !reader.OnDataFrag(GuidPrefix.NewUnique(), Frag(1, big, 1, 1)));
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(1, big, 4, 1));  // last fragment first
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(2, odd, 1, 2));  // second sample interleaved
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(1, big, 2, 2));
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(1, big, 4, 1));  // duplicate
+        Check("frag: incomplete samples held back", delivered.Count == 0);
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(1, big, 1, 1));
+        Check("frag: sample reassembled out of order",
+            delivered.Count == 1 && delivered[0].Sn == 1 && delivered[0].Payload.AsSpan().SequenceEqual(big));
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(2, odd, 3, 1));
+        Check("frag: odd-sized sample reassembled",
+            delivered.Count == 2 && delivered[1].Sn == 2 && delivered[1].Payload.AsSpan().SequenceEqual(odd));
+        reader.OnDataFrag(pd.Guid.Prefix, Frag(1, big, 1, 4));
+        Check("frag: completed sample not delivered twice", delivered.Count == 2);
+
         // rmw_dds_common/ParticipantEntitiesInfo layout (Humble: gids are char[24]).
         var pguid = new RtpsGuid(pd.Guid.Prefix, EntityId.Participant);
         byte[] pei = Ros2Node.EncodeParticipantEntitiesInfo(pguid, "/", "probe",

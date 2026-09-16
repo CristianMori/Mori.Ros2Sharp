@@ -39,19 +39,29 @@ public sealed class Ros2Node : IDisposable
 
     public void AddPeer(IPAddress address) => Participant.AddPeer(address);
 
-    /// <summary>Creates a publisher from ROS names, e.g. ("/chatter", "std_msgs/msg/String").</summary>
-    public RtpsWriterEndpoint CreatePublisher(string topic, string type, bool reliable = true)
+    /// <summary>
+    /// Creates a publisher from ROS names, e.g. ("/chatter", "std_msgs/msg/String").
+    /// <paramref name="transientLocal"/> makes it a latched topic: the last
+    /// <paramref name="historyDepth"/> messages are delivered to subscriptions that appear
+    /// later (what /tf_static and map publishers use).
+    /// </summary>
+    public RtpsWriterEndpoint CreatePublisher(string topic, string type, bool reliable = true,
+        bool transientLocal = false, int historyDepth = 10)
     {
-        var writer = Participant.CreateWriter(Ros2Names.Topic(topic), Ros2Names.Type(type), reliable);
+        var writer = Participant.CreateWriter(Ros2Names.Topic(topic), Ros2Names.Type(type), reliable, transientLocal, historyDepth);
         lock (_lock) _writerGids.Add(writer.Guid);
         PublishGraph();
         return writer;
     }
 
-    /// <summary>Creates a subscription from ROS names, e.g. ("/chatter", "std_msgs/msg/String").</summary>
-    public RtpsReaderEndpoint CreateSubscription(string topic, string type, bool reliable = true)
+    /// <summary>
+    /// Creates a subscription from ROS names, e.g. ("/chatter", "std_msgs/msg/String").
+    /// <paramref name="transientLocal"/> requests latched history and restricts matching to
+    /// transient-local publishers, as the DDS durability rule requires.
+    /// </summary>
+    public RtpsReaderEndpoint CreateSubscription(string topic, string type, bool reliable = true, bool transientLocal = false)
     {
-        var reader = Participant.CreateReader(Ros2Names.Topic(topic), Ros2Names.Type(type), reliable);
+        var reader = Participant.CreateReader(Ros2Names.Topic(topic), Ros2Names.Type(type), reliable, transientLocal);
         lock (_lock) _readerGids.Add(reader.Guid);
         PublishGraph();
         return reader;

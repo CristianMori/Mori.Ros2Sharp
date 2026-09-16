@@ -90,6 +90,78 @@ public sealed class RtpsMessageWriter
     }
 
     /// <summary>
+    /// A run of consecutive fragments of one sample. All fragments of a sample share one
+    /// fragment size; only the sample's last fragment may be shorter. Fragment numbers are
+    /// 1-based. Note the flag layout differs from DATA: here 0x04 is the key flag and there
+    /// is no "data present" bit — a DATA_FRAG always carries payload.
+    /// </summary>
+    public void AddDataFrag(EntityId readerId, EntityId writerId, long sequenceNumber,
+        uint fragmentStartingNum, ushort fragmentsInSubmessage, ushort fragmentSize, uint sampleSize,
+        ReadOnlySpan<byte> fragmentBytes, RtpsGuid? relatedGuid = null, long relatedSn = 0)
+    {
+        int start = Begin(0x16, (byte)(relatedGuid is null ? 0x01 : 0x03)); // little-endian [+ inline QoS]
+        U16(0);                        // extraFlags
+        U16(28);                       // octetsToInlineQos: ids + sn + fragment header
+        Entity(readerId);
+        Entity(writerId);
+        Sn(sequenceNumber);
+        U32(fragmentStartingNum);
+        U16(fragmentsInSubmessage);
+        U16(fragmentSize);
+        U32(sampleSize);
+        if (relatedGuid is { } rg)
+        {
+            Span<byte> g = stackalloc byte[16];
+            rg.WriteTo(g);
+            U16(Pid.RelatedSampleIdentity); U16(24); Bytes(g); Sn(relatedSn);
+            U16(Pid.Sentinel); U16(0);
+        }
+        Bytes(fragmentBytes);
+        End(start);
+    }
+
+    /// <summary>Tells the reader which fragments of one sample the writer has sent so far.</summary>
+    public void AddHeartbeatFrag(EntityId readerId, EntityId writerId, long sequenceNumber, uint lastFragmentNum, uint count)
+    {
+        int start = Begin(0x13, 0x01);
+        Entity(readerId);
+        Entity(writerId);
+        Sn(sequenceNumber);
+        U32(lastFragmentNum);
+        U32(count);
+        End(start);
+    }
+
+    /// <summary>
+    /// Requests specific fragments of one sample. The fragment-number set is 32-bit based
+    /// (unlike the 64-bit sequence-number set of ACKNACK) and covers at most 256 fragments
+    /// from <paramref name="baseFragment"/>.
+    /// </summary>
+    public void AddNackFrag(EntityId readerId, EntityId writerId, long sequenceNumber,
+        uint baseFragment, IReadOnlyList<uint> missing, uint count)
+    {
+        int start = Begin(0x12, 0x01);
+        Entity(readerId);
+        Entity(writerId);
+        Sn(sequenceNumber);
+        U32(baseFragment);
+        int numBits = 0;
+        foreach (uint f in missing)
+            if (f >= baseFragment && f - baseFragment < 256)
+                numBits = Math.Max(numBits, (int)(f - baseFragment) + 1);
+        Span<uint> bitmap = stackalloc uint[8];
+        foreach (uint f in missing)
+        {
+            long i = (long)f - baseFragment;
+            if (i >= 0 && i < numBits) bitmap[(int)(i / 32)] |= 1u << (31 - (int)(i % 32)); // MSB-first
+        }
+        U32((uint)numBits);
+        for (int i = 0; i < (numBits + 31) / 32; i++) U32(bitmap[i]);
+        U32(count);
+        End(start);
+    }
+
+    /// <summary>
     /// Advertises the writer's available range [firstSn, lastSn]. A non-final heartbeat obliges
     /// the reader to respond with an ACKNACK even when it is missing nothing.
     /// </summary>
@@ -199,6 +271,55 @@ public sealed class RtpsData
     public long RelatedSn { get; init; }
 }
 
+/// <summary>A DATA_FRAG submessage: a run of consecutive fragments of one large sample.</summary>
+public sealed class RtpsDataFrag
+{
+    public EntityId ReaderId { get; init; }
+    public EntityId WriterId { get; init; }
+    public long SequenceNumber { get; init; }
+    public RtpsTime? Timestamp { get; init; }
+
+    /// <summary>1-based number of the first fragment carried here.</summary>
+    public uint FragmentStartingNum { get; init; }
+
+    /// <summary>How many consecutive fragments follow, starting at <see cref="FragmentStartingNum"/>.</summary>
+    public int FragmentsInSubmessage { get; init; }
+
+    /// <summary>The size every fragment of this sample uses (the sample's last one may be shorter).</summary>
+    public int FragmentSize { get; init; }
+
+    /// <summary>The full serialized size of the sample being reassembled, encapsulation included.</summary>
+    public uint SampleSize { get; init; }
+
+    /// <summary>The fragment bytes, trimmed to the sample's end; padding is never included.</summary>
+    public byte[] Fragments { get; init; } = Array.Empty<byte>();
+
+    public byte[]? KeyHash { get; init; }
+    public bool Disposed { get; init; }
+    public RtpsGuid? RelatedGuid { get; init; }
+    public long RelatedSn { get; init; }
+}
+
+/// <summary>A HEARTBEAT_FRAG submessage: the writer has sent fragments 1..LastFragmentNum of one sample.</summary>
+public sealed class RtpsHeartbeatFrag
+{
+    public EntityId ReaderId { get; init; }
+    public EntityId WriterId { get; init; }
+    public long SequenceNumber { get; init; }
+    public uint LastFragmentNum { get; init; }
+    public uint Count { get; init; }
+}
+
+/// <summary>A NACK_FRAG submessage: the reader still needs the listed fragments of one sample.</summary>
+public sealed class RtpsNackFrag
+{
+    public EntityId ReaderId { get; init; }
+    public EntityId WriterId { get; init; }
+    public long SequenceNumber { get; init; }
+    public List<uint> Missing { get; init; } = new();
+    public uint Count { get; init; }
+}
+
 /// <summary>A HEARTBEAT submessage: the writer's available sequence-number range.</summary>
 public sealed class RtpsHeartbeat
 {
@@ -242,8 +363,11 @@ public sealed class RtpsMessage
     public GuidPrefix? Destination { get; private set; }
 
     public List<RtpsData> Data { get; } = new();
+    public List<RtpsDataFrag> DataFrags { get; } = new();
     public List<RtpsHeartbeat> Heartbeats { get; } = new();
+    public List<RtpsHeartbeatFrag> HeartbeatFrags { get; } = new();
     public List<RtpsAckNack> AckNacks { get; } = new();
+    public List<RtpsNackFrag> NackFrags { get; } = new();
     public List<RtpsGap> Gaps { get; } = new();
 
     /// <summary>
@@ -292,6 +416,39 @@ public sealed class RtpsMessage
                     if (TryParseData(content, flags, le, timestamp, out var data))
                         m.Data.Add(data);
                     break;
+                case 0x16: // DATA_FRAG
+                    if (TryParseDataFrag(content, flags, le, timestamp, out var frag))
+                        m.DataFrags.Add(frag);
+                    break;
+                case 0x13 when content.Length >= 24: // HEARTBEAT_FRAG
+                    m.HeartbeatFrags.Add(new RtpsHeartbeatFrag
+                    {
+                        ReaderId = EntityId.ReadFrom(content),
+                        WriterId = EntityId.ReadFrom(content.Slice(4)),
+                        SequenceNumber = ReadSn(content.Slice(8), le),
+                        LastFragmentNum = ReadU32(content.Slice(16), le),
+                        Count = ReadU32(content.Slice(20), le),
+                    });
+                    break;
+                case 0x12 when content.Length >= 28: // NACK_FRAG
+                {
+                    uint baseFrag = ReadU32(content.Slice(16), le);
+                    uint numBits = ReadU32(content.Slice(20), le);
+                    int words = ((int)numBits + 31) / 32;
+                    if (numBits > 256 || content.Length < 24 + words * 4 + 4) break;
+                    var nf = new RtpsNackFrag
+                    {
+                        ReaderId = EntityId.ReadFrom(content),
+                        WriterId = EntityId.ReadFrom(content.Slice(4)),
+                        SequenceNumber = ReadSn(content.Slice(8), le),
+                        Count = ReadU32(content.Slice(24 + words * 4), le),
+                    };
+                    for (int i = 0; i < numBits; i++)
+                        if ((ReadU32(content.Slice(24 + (i / 32) * 4), le) & (1u << (31 - i % 32))) != 0)
+                            nf.Missing.Add(baseFrag + (uint)i);
+                    m.NackFrags.Add(nf);
+                    break;
+                }
                 case 0x07 when content.Length >= 28: // HEARTBEAT
                     m.Heartbeats.Add(new RtpsHeartbeat
                     {
@@ -364,30 +521,7 @@ public sealed class RtpsMessage
 
         int at = 4 + octetsToInlineQos;
         if (at > c.Length) return false;
-        byte[]? keyHash = null;
-        bool disposed = false;
-        RtpsGuid? relatedGuid = null;
-        long relatedSn = 0;
-        if ((flags & 0x02) != 0) // inline QoS: walk the parameter list to its sentinel
-        {
-            while (at + 4 <= c.Length)
-            {
-                ushort pid = ReadU16(c.Slice(at), le);
-                ushort plen = ReadU16(c.Slice(at + 2), le);
-                at += 4;
-                if (pid == Pid.Sentinel) break;
-                if (pid == Pid.KeyHash && plen >= 16 && at + 16 <= c.Length)
-                    keyHash = c.Slice(at, 16).ToArray();
-                else if (pid == Pid.StatusInfo && plen >= 4 && at + 4 <= c.Length)
-                    disposed = (c[at + 3] & 0x03) != 0;
-                else if (pid == Pid.RelatedSampleIdentity && plen >= 24 && at + 24 <= c.Length)
-                {
-                    relatedGuid = RtpsGuid.ReadFrom(c.Slice(at, 16));
-                    relatedSn = ReadSn(c.Slice(at + 16), le);
-                }
-                at += plen;
-            }
-        }
+        var qos = (flags & 0x02) != 0 ? ParseInlineQos(c, ref at, le) : default;
 
         byte[] payload = Array.Empty<byte>();
         if ((flags & 0x0c) != 0 && at <= c.Length) // data or key present
@@ -400,12 +534,91 @@ public sealed class RtpsMessage
             SequenceNumber = sn,
             Timestamp = timestamp,
             Payload = payload,
-            KeyHash = keyHash,
-            Disposed = disposed,
-            RelatedGuid = relatedGuid,
-            RelatedSn = relatedSn,
+            KeyHash = qos.KeyHash,
+            Disposed = qos.Disposed,
+            RelatedGuid = qos.RelatedGuid,
+            RelatedSn = qos.RelatedSn,
         };
         return true;
+    }
+
+    // DATA_FRAG: the DATA prologue, then the fragment header (start number, count, size,
+    // sample size), optional inline QoS, and the fragment bytes. Anything internally
+    // inconsistent (zero sizes, a start past the sample, fewer bytes than announced) is
+    // rejected rather than partially trusted.
+    private static bool TryParseDataFrag(ReadOnlySpan<byte> c, byte flags, bool le, RtpsTime? timestamp, out RtpsDataFrag frag)
+    {
+        frag = null!;
+        if (c.Length < 32) return false;
+
+        int octetsToInlineQos = ReadU16(c.Slice(2), le);
+        var readerId = EntityId.ReadFrom(c.Slice(4));
+        var writerId = EntityId.ReadFrom(c.Slice(8));
+        long sn = ReadSn(c.Slice(12), le);
+        uint startNum = ReadU32(c.Slice(20), le);
+        int count = ReadU16(c.Slice(24), le);
+        int fragSize = ReadU16(c.Slice(26), le);
+        uint sampleSize = ReadU32(c.Slice(28), le);
+        if (startNum == 0 || count == 0 || fragSize == 0 || sampleSize == 0) return false;
+
+        int at = 4 + octetsToInlineQos;
+        if (at > c.Length) return false;
+        var qos = (flags & 0x02) != 0 ? ParseInlineQos(c, ref at, le) : default;
+
+        long offset = (long)(startNum - 1) * fragSize;
+        if (offset >= sampleSize) return false;
+        long expected = Math.Min((long)count * fragSize, sampleSize - offset);
+        if (at + expected > c.Length) return false;
+
+        frag = new RtpsDataFrag
+        {
+            ReaderId = readerId,
+            WriterId = writerId,
+            SequenceNumber = sn,
+            Timestamp = timestamp,
+            FragmentStartingNum = startNum,
+            FragmentsInSubmessage = count,
+            FragmentSize = fragSize,
+            SampleSize = sampleSize,
+            Fragments = c.Slice(at, (int)expected).ToArray(),
+            KeyHash = qos.KeyHash,
+            Disposed = qos.Disposed,
+            RelatedGuid = qos.RelatedGuid,
+            RelatedSn = qos.RelatedSn,
+        };
+        return true;
+    }
+
+    private struct InlineQos
+    {
+        public byte[]? KeyHash;
+        public bool Disposed;
+        public RtpsGuid? RelatedGuid;
+        public long RelatedSn;
+    }
+
+    // Walks an inline-QoS parameter list to its sentinel, lifting the parameters we act on.
+    private static InlineQos ParseInlineQos(ReadOnlySpan<byte> c, ref int at, bool le)
+    {
+        var q = new InlineQos();
+        while (at + 4 <= c.Length)
+        {
+            ushort pid = ReadU16(c.Slice(at), le);
+            ushort plen = ReadU16(c.Slice(at + 2), le);
+            at += 4;
+            if (pid == Pid.Sentinel) break;
+            if (pid == Pid.KeyHash && plen >= 16 && at + 16 <= c.Length)
+                q.KeyHash = c.Slice(at, 16).ToArray();
+            else if (pid == Pid.StatusInfo && plen >= 4 && at + 4 <= c.Length)
+                q.Disposed = (c[at + 3] & 0x03) != 0;
+            else if (pid == Pid.RelatedSampleIdentity && plen >= 24 && at + 24 <= c.Length)
+            {
+                q.RelatedGuid = RtpsGuid.ReadFrom(c.Slice(at, 16));
+                q.RelatedSn = ReadSn(c.Slice(at + 16), le);
+            }
+            at += plen;
+        }
+        return q;
     }
 
     private static long ReadSn(ReadOnlySpan<byte> s, bool le) =>

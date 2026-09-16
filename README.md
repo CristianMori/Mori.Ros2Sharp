@@ -17,7 +17,7 @@ package, `new Ros2Node(...)`, and the process shows up on the ROS graph like any
 | **Serialization** | OMG CDR (XCDR1) little-endian reader/writer with correct alignment — the wire format of every ROS 2 message |
 | **Discovery** | SPDP participant discovery over multicast and unicast initial peers; lease tracking; immediate departure announcements (dispose) on shutdown |
 | **Endpoints** | SEDP endpoint discovery in both directions, with reliability/durability compatibility matching |
-| **Pub/sub** | Reliable and best-effort writers and readers: bounded history, HEARTBEAT/ACKNACK retransmission, GAP handling, duplicate suppression |
+| **Pub/sub** | Reliable and best-effort writers and readers: bounded history, in-order delivery, HEARTBEAT/ACKNACK retransmission, GAP handling, duplicate suppression; latched topics (transient-local durability) in both directions; large samples (images, point clouds) fragmented and reassembled with DATA_FRAG/NACK_FRAG recovery |
 | **Graph** | `ros_discovery_info` participation — the node appears in `ros2 node list`, its topics in `ros2 topic list` |
 | **Services** | Both sides: serve a service that `ros2 service call` can invoke, or call an existing ROS 2 service, with request/response correlation |
 | **Codegen** | Typed message classes generated from `.msg` files — a bundled build-time source generator and the `ros2msggen` CLI, with the common interface packages embedded |
@@ -58,6 +58,26 @@ sub.DataReceived += (writer, payload, timestamp) =>
 };
 node.Start();
 ```
+
+Discovery is symmetric but not simultaneous, so the first message of a stream can be
+written before the other side has finished matching, and a volatile subscription then never
+sees it (the familiar ROS 2 "first message lost"). Two ways to handle it, as in any ROS 2
+client library:
+
+```csharp
+// Wait until at least one subscription has confirmed the match, then publish.
+await chatter.WaitForReadersAsync(1, TimeSpan.FromSeconds(5));
+chatter.Write(first);
+
+// Or make the topic latched: late subscriptions receive the last messages (here 1).
+var tfStatic = node.CreatePublisher("/tf_static", "tf2_msgs/msg/TFMessage",
+    transientLocal: true, historyDepth: 1);
+var sub = node.CreateSubscription("/tf_static", "tf2_msgs/msg/TFMessage", transientLocal: true);
+```
+
+Messages that arrive before a handler is attached to `DataReceived` are held (the most recent
+64) and delivered to the first handler, so latched history is never missed by subscribing on
+one line and attaching on the next.
 
 A service server (`std_srvs/srv/SetBool`):
 
@@ -128,7 +148,14 @@ dotnet run --project samples/dds-probe -- sub 0 30      # subscribe to /chatter 
 dotnet run --project samples/dds-probe -- node 0 30     # full node /cs_probe publishing /chatter
 dotnet run --project samples/dds-probe -- serve 0 30    # serve /set_bool (std_srvs/srv/SetBool)
 dotnet run --project samples/dds-probe -- call 0 30     # call /set_bool three times
+dotnet run --project samples/dds-probe -- loopback      # two in-process nodes exchange 1 MB samples
 ```
+
+`pub` takes an optional payload size (`pub 0 30 <peer> 300000`) to publish fragmented
+samples; `sub` prints the size and checksum of every sample it receives. `loss=N` on `pub`,
+`sub`, or as the loopback's second argument (`loopback 1000000 30`) drops N% of fragment
+datagrams to exercise retransmission. `latched` makes `pub` a transient-local publisher that
+writes once and waits, and `sub` a transient-local subscription.
 
 Every mode accepts trailing peer addresses for networks where multicast cannot reach the
 other side (containers, VMs, WSL): `dds-probe pub 0 30 192.168.1.20`. The library announces
@@ -138,16 +165,28 @@ the same mechanism DDS initial-peer lists use.
 ## Scope and current limits
 
 - **Transports**: UDPv4 unicast and multicast. Peers that also advertise shared-memory or
-  TCP locators (Fast DDS does by default) interoperate fine — they fall back to UDP.
+  TCP locators (Fast DDS does by default) interoperate fine — they fall back to UDP. On hosts
+  with many adapters (VPNs, hypervisors, containers) the library advertises at most four
+  addresses, the ones routing to configured peers first, because Fast DDS only keeps the
+  first four it sees; `RtpsParticipant.AdvertisedAddresses` pins the list explicitly.
 - **Middlewares**: RTPS is the standardized DDS wire protocol, so discovery and pub/sub are
-  vendor-neutral by design; validation so far is against Fast DDS. Service correlation
-  follows the convention of `rmw_fastrtps` (the ROS 2 default middleware). Non-DDS
-  middlewares (e.g. Zenoh-based) are a different protocol family and out of scope.
-- **QoS**: reliable / best-effort, volatile / transient-local, keep-last history. This covers
-  the ROS 2 defaults and the common profiles; deadline, lifespan, and liveliness QoS are not
-  implemented.
-- **Message size**: no fragmentation support yet — payloads must fit one UDP datagram
-  (roughly 60 KB).
+  vendor-neutral by design. Validated against Fast DDS (the ROS 2 default, including
+  services) and Cyclone DDS (discovery, pub/sub, fragmented samples in both directions).
+  Cyclone runs without well-known unicast ports by default and is found through multicast
+  only, which the library sends on every interface. Service correlation follows the
+  convention of `rmw_fastrtps`. Non-DDS middlewares (e.g. Zenoh-based) are a different
+  protocol family and out of scope.
+- **QoS**: reliable / best-effort, volatile / transient-local, keep-last history, with the
+  DDS request/offer compatibility rule at matching. This covers the ROS 2 defaults and the
+  common profiles; deadline, lifespan, and liveliness QoS are not implemented.
+- **Message size**: samples larger than one datagram are fragmented (default fragment size
+  64 KB, matching Fast DDS; Cyclone DDS receives them fine too) and reassembled on receipt;
+  `RtpsParticipant.FragmentSize` lowers it for links where IP fragmentation is undesirable.
+  Lost fragments are re-requested individually (NACK_FRAG); a reliable writer can
+  `WaitForAcknowledgmentsAsync` before shutting down so retransmissions in progress complete.
+  Cyclone's default writer configuration hands out a large sample in request-driven chunks,
+  so its throughput toward any reader is bounded by its own history watermark and retransmit
+  queue settings.
 - **Type descriptions**: endpoint matching is by topic and type name, which is how ROS 2
   Humble matches. The newer type-hash system is not implemented.
 - **.msg grammar**: constants, defaults, bounded strings/arrays, and nested messages are

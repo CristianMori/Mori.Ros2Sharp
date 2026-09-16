@@ -8,7 +8,7 @@
     <RootNamespace>Mori.Ros2Sharp</RootNamespace>
 
     <PackageId>Mori.Ros2Sharp</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <PackageProjectUrl>https://github.com/CristianMori/Mori.Ros2Sharp</PackageProjectUrl>
     <RepositoryUrl>https://github.com/CristianMori/Mori.Ros2Sharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -24,6 +24,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The probe's offline checks drive the endpoint internals (fragment reassembly) directly. -->
+    <InternalsVisibleTo Include="dds-probe" />
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <!-- The .msg parser and C# emitter are shared source with the generator tools (which cannot
          reference a net8.0 assembly), so they are compiled into each project from shared\. -->
