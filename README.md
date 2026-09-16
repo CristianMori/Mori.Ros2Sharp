@@ -20,7 +20,7 @@ package, `new Ros2Node(...)`, and the process shows up on the ROS graph like any
 | **Pub/sub** | Reliable and best-effort writers and readers: bounded history, in-order delivery, HEARTBEAT/ACKNACK retransmission, GAP handling, duplicate suppression; latched topics (transient-local durability) in both directions; large samples (images, point clouds) fragmented and reassembled with DATA_FRAG/NACK_FRAG recovery |
 | **Graph** | `ros_discovery_info` participation — the node appears in `ros2 node list`, its topics in `ros2 topic list` |
 | **Services** | Both sides: serve a service that `ros2 service call` can invoke, or call an existing ROS 2 service, with request/response correlation |
-| **Codegen** | Typed message classes generated from `.msg` files — a bundled build-time source generator and the `ros2msggen` CLI, with the common interface packages embedded |
+| **Codegen** | Typed message and service classes generated from `.msg` and `.srv` files — a bundled build-time source generator and the `ros2msggen` CLI, with the common interface packages embedded |
 
 Interoperability is validated live against unmodified ROS 2 Humble nodes (Fast DDS, the
 default middleware): `ros2 topic echo` prints what this library publishes, subscriptions
@@ -130,10 +130,27 @@ var back = Ros2Messages.geometry_msgs.Twist.FromBytes(payload);
 
 Generated classes carry `RosType`/`DdsType` constants, apply `.msg` field defaults, enforce
 fixed array lengths, and round-trip byte-identically with every DDS implementation tested.
-The same emitter is available as a CLI for offline generation:
+
+`.srv` files generate a holder class with nested `Request` and `Response` messages, and the
+node has typed service overloads. The `std_srvs` services (`Empty`, `SetBool`, `Trigger`) are
+always generated:
+
+```csharp
+using Ros2Messages.std_srvs;
+
+node.CreateService<SetBool.Request, SetBool.Response>("/set_bool", SetBool.RosType,
+    req => new SetBool.Response { Success = true, Message = $"received {req.Data}" });
+
+var client = node.CreateClient<Trigger.Request, Trigger.Response>("/trigger", Trigger.RosType);
+Trigger.Response reply = await client.CallAsync(new Trigger.Request(), TimeSpan.FromSeconds(5));
+```
+
+Typed publish and subscribe come as extension methods on the endpoints:
+`pub.Write(twist)` and `sub.OnMessage<Twist>(t => …)`. The same emitter is available as a
+CLI for offline generation:
 
 ```
-ros2msggen -o Generated -n MyMessages path/to/my_package/msg
+ros2msggen -o Generated -n MyMessages path/to/my_package
 ```
 
 For DDS-level work (custom QoS combinations, non-ROS DDS systems, protocol experiments),
@@ -142,7 +159,9 @@ and locator control.
 
 ## The probe
 
-`samples/dds-probe` exercises every layer against a live system:
+`samples/msg-demo` checks the generated code offline (`msg-demo`) and live: `msg-demo live`
+publishes a generated Twist, `msg-demo serve` / `msg-demo call` run typed `std_srvs` servers
+and clients. `samples/dds-probe` exercises every layer against a live system:
 
 ```
 dotnet run --project samples/dds-probe -- selftest      # offline wire-format checks
@@ -194,8 +213,9 @@ the same mechanism DDS initial-peer lists use.
   queue settings.
 - **Type descriptions**: endpoint matching is by topic and type name, which is how ROS 2
   Humble matches. The newer type-hash system is not implemented.
-- **.msg grammar**: constants, defaults, bounded strings/arrays, and nested messages are
-  supported; `wstring` fields and array default values are not.
+- **.msg/.srv grammar**: constants, defaults, bounded strings/arrays, nested messages, and
+  the request/response split are supported; `wstring` fields, array default values, and
+  `.action` files are not.
 
 ## Building
 

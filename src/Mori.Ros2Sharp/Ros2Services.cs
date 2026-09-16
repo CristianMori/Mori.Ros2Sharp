@@ -30,6 +30,26 @@ public sealed class Ros2Service
     }
 }
 
+/// <summary>A typed view of a <see cref="Ros2Client"/>: request and response as generated message classes.</summary>
+public sealed class Ros2Client<TRequest, TResponse>
+    where TRequest : IRos2Message
+    where TResponse : IRos2Message, new()
+{
+    /// <summary>The byte-level client underneath (matching state, raw calls).</summary>
+    public Ros2Client Raw { get; }
+
+    public string ServiceName => Raw.ServiceName;
+
+    /// <summary>True once a server's request reader and reply writer are both matched.</summary>
+    public bool ServerAvailable => Raw.ServerAvailable;
+
+    internal Ros2Client(Ros2Client raw) => Raw = raw;
+
+    /// <summary>Sends a typed request and awaits the typed response.</summary>
+    public async Task<TResponse> CallAsync(TRequest request, TimeSpan? timeout = null) =>
+        Ros2MessageExtensions.FromPayload<TResponse>(await Raw.CallAsync(request.ToPayload(), timeout).ConfigureAwait(false));
+}
+
 /// <summary>A ROS 2 service client: correlated request/response over the rq/rr topic pair.</summary>
 public sealed class Ros2Client
 {

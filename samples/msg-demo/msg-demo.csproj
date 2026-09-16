@@ -15,7 +15,7 @@
     <!-- The source generator, exactly as a package consumer would get it. -->
     <ProjectReference Include="..\..\src\Mori.Ros2Sharp.Generators\Mori.Ros2Sharp.Generators.csproj"
                       OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-    <AdditionalFiles Include="msgs\**\*.msg" />
+    <AdditionalFiles Include="msgs\**\*.msg;msgs\**\*.srv" />
     <CompilerVisibleProperty Include="Ros2SharpNamespace" />
   </ItemGroup>
 

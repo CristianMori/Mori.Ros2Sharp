@@ -9,9 +9,17 @@ using Mori.Ros2Sharp;
 //   msg-demo live [domain] [seconds] [peerIp…]
 //                                     publish a generated geometry_msgs/Twist on /cmd_vel
 //                                     (verify with: ros2 topic echo /cmd_vel geometry_msgs/msg/Twist)
+//   msg-demo serve [domain] [seconds] [peerIp…]
+//                                     typed std_srvs servers: /set_bool (SetBool), /trigger (Trigger)
+//   msg-demo call [domain] [seconds] [peerIp…]
+//                                     typed clients calling /set_bool and /trigger
 
 if (args.Length > 0 && args[0].Equals("live", StringComparison.OrdinalIgnoreCase))
     return await Live(args);
+if (args.Length > 0 && args[0].Equals("serve", StringComparison.OrdinalIgnoreCase))
+    return await Serve(args);
+if (args.Length > 0 && args[0].Equals("call", StringComparison.OrdinalIgnoreCase))
+    return await Call(args);
 
 int failures = 0;
 void Check(string name, bool ok)
@@ -122,8 +130,120 @@ Check("parser: bounds, defaults, arrays",
     spec.Fields[2].FixedLength == 2 &&
     spec.Fields[3].BaseType == "geometry_msgs/Point");
 
+// Services: generated from .srv files (Pad from this project, std_srvs from the embedded set).
+Check("service type constants",
+    Ros2Messages.std_srvs.SetBool.RosType == "std_srvs/srv/SetBool" &&
+    Ros2Messages.std_srvs.SetBool.Request.DdsType == "std_srvs::srv::dds_::SetBool_Request_" &&
+    Ros2Messages.std_srvs.SetBool.Response.DdsType == "std_srvs::srv::dds_::SetBool_Response_" &&
+    Ros2Messages.demo_msgs.Pad.Request.MAX_REPEAT == 200);
+var handReq = new CdrWriter(CdrEncapsulation.CdrLe);
+handReq.Write(true);
+Check("SetBool request bytes match hand-rolled CDR",
+    new Ros2Messages.std_srvs.SetBool.Request { Data = true }.ToBytes().AsSpan().SequenceEqual(handReq.ToArray()));
+var handResp = new CdrWriter(CdrEncapsulation.CdrLe);
+handResp.Write(false); handResp.Write("nope");
+Check("SetBool response bytes match hand-rolled CDR",
+    new Ros2Messages.std_srvs.SetBool.Response { Success = false, Message = "nope" }.ToBytes().AsSpan().SequenceEqual(handResp.ToArray()));
+
+// An empty struct is one placeholder octet on the ROS 2 wire, never zero bytes.
+byte[] emptyReq = new Ros2Messages.std_srvs.Trigger.Request().ToBytes();
+byte[] emptyMsg = new Ros2Messages.std_msgs.Empty().ToBytes();
+Check("empty struct serializes as one placeholder byte",
+    emptyReq.Length == 5 && emptyReq[4] == 0 && emptyMsg.Length == 5 &&
+    Ros2Messages.std_srvs.Trigger.Request.FromBytes(emptyReq) != null);
+
+var padReq = new Ros2Messages.demo_msgs.Pad.Request { Text = "abc", Repeat = 3 };
+padReq.Origin.X = 1.5;
+var padReqBack = Ros2Messages.demo_msgs.Pad.Request.FromBytes(padReq.ToBytes());
+Check("Pad request round-trip (nested geometry_msgs/Point, default repeat=1)",
+    padReqBack.Text == "abc" && padReqBack.Repeat == 3 && padReqBack.Origin.X == 1.5 &&
+    new Ros2Messages.demo_msgs.Pad.Request().Repeat == 1);
+
+// A typed service call between two in-process nodes.
+{
+    using var server = new Ros2Node("msg_demo_server");
+    using var caller = new Ros2Node("msg_demo_caller");
+    server.CreateService<Ros2Messages.demo_msgs.Pad.Request, Ros2Messages.demo_msgs.Pad.Response>(
+        "/pad", Ros2Messages.demo_msgs.Pad.RosType, req =>
+        {
+            var resp = new Ros2Messages.demo_msgs.Pad.Response { Ok = true, Digest = $"{req.Text}/{req.Origin.X}" };
+            resp.Padded.Data = string.Concat(Enumerable.Repeat(req.Text, req.Repeat));
+            return resp;
+        });
+    var client = caller.CreateClient<Ros2Messages.demo_msgs.Pad.Request, Ros2Messages.demo_msgs.Pad.Response>(
+        "/pad", Ros2Messages.demo_msgs.Pad.RosType);
+    server.Start();
+    caller.Start();
+    for (int i = 0; i < 100 && !client.ServerAvailable; i++) await Task.Delay(50);
+    bool typedOk = false;
+    try
+    {
+        var resp = await client.CallAsync(padReq, TimeSpan.FromSeconds(5));
+        typedOk = resp.Ok && resp.Digest == "abc/1.5" && resp.Padded.Data == "abcabcabc";
+    }
+    catch (TaskCanceledException) { }
+    Check("typed service call between two nodes", typedOk);
+}
+
 Console.WriteLine(failures == 0 ? "all checks passed" : $"{failures} check(s) FAILED");
 return failures == 0 ? 0 : 1;
+
+static async Task<int> Serve(string[] args)
+{
+    int domain = args.Length > 1 ? int.Parse(args[1]) : 0;
+    int seconds = args.Length > 2 ? int.Parse(args[2]) : 30;
+    using var node = new Ros2Node("cs_msg_demo", "/", domain);
+    foreach (string peer in args.Skip(3))
+        node.AddPeer(IPAddress.Parse(peer));
+    node.CreateService<Ros2Messages.std_srvs.SetBool.Request, Ros2Messages.std_srvs.SetBool.Response>(
+        "/set_bool", Ros2Messages.std_srvs.SetBool.RosType, req =>
+        {
+            Console.WriteLine($"    /set_bool request: data={req.Data}");
+            return new Ros2Messages.std_srvs.SetBool.Response { Success = true, Message = $"C# saw {req.Data}" };
+        });
+    node.CreateService<Ros2Messages.std_srvs.Trigger.Request, Ros2Messages.std_srvs.Trigger.Response>(
+        "/trigger", Ros2Messages.std_srvs.Trigger.RosType, _ =>
+        {
+            Console.WriteLine("    /trigger request");
+            return new Ros2Messages.std_srvs.Trigger.Response { Success = true, Message = "triggered by C#" };
+        });
+    node.Start();
+    Console.WriteLine($"msg-demo[serve]: typed /set_bool and /trigger on domain {domain}, {seconds}s…");
+    await Task.Delay(TimeSpan.FromSeconds(seconds));
+    return 0;
+}
+
+static async Task<int> Call(string[] args)
+{
+    int domain = args.Length > 1 ? int.Parse(args[1]) : 0;
+    using var node = new Ros2Node("cs_msg_demo_client", "/", domain);
+    foreach (string peer in args.Skip(3))
+        node.AddPeer(IPAddress.Parse(peer));
+    var setBool = node.CreateClient<Ros2Messages.std_srvs.SetBool.Request, Ros2Messages.std_srvs.SetBool.Response>(
+        "/set_bool", Ros2Messages.std_srvs.SetBool.RosType);
+    var trigger = node.CreateClient<Ros2Messages.std_srvs.Trigger.Request, Ros2Messages.std_srvs.Trigger.Response>(
+        "/trigger", Ros2Messages.std_srvs.Trigger.RosType);
+    node.Start();
+    for (int i = 0; i < 60 && !(setBool.ServerAvailable && trigger.ServerAvailable); i++) await Task.Delay(250);
+    Console.WriteLine($"    servers matched: set_bool={setBool.ServerAvailable} trigger={trigger.ServerAvailable}");
+    int failures = 0;
+    for (int i = 1; i <= 2; i++)
+    {
+        try
+        {
+            var r = await setBool.CallAsync(new Ros2Messages.std_srvs.SetBool.Request { Data = i % 2 == 1 }, TimeSpan.FromSeconds(8));
+            Console.WriteLine($"    /set_bool({i % 2 == 1}) -> success={r.Success} message=\"{r.Message}\"");
+        }
+        catch (TaskCanceledException) { Console.WriteLine($"    /set_bool call {i} timed out"); failures++; }
+        try
+        {
+            var r = await trigger.CallAsync(new Ros2Messages.std_srvs.Trigger.Request(), TimeSpan.FromSeconds(8));
+            Console.WriteLine($"    /trigger -> success={r.Success} message=\"{r.Message}\"");
+        }
+        catch (TaskCanceledException) { Console.WriteLine($"    /trigger call {i} timed out"); failures++; }
+    }
+    return failures == 0 ? 0 : 1;
+}
 
 static async Task<int> Live(string[] args)
 {

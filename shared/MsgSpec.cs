@@ -151,9 +151,17 @@ public delegate string? MsgTextResolver(string fullType);
 public sealed class MsgCatalog
 {
     private readonly MsgTextResolver? _custom;
+    private readonly MsgTextResolver? _customService;
     private readonly Dictionary<string, MsgSpec> _specs = new Dictionary<string, MsgSpec>();
+    private readonly Dictionary<string, SrvSpec> _services = new Dictionary<string, SrvSpec>();
 
-    public MsgCatalog(MsgTextResolver? custom = null) => _custom = custom;
+    /// <param name="custom">Supplies .msg text by <c>package/Name</c>, or null.</param>
+    /// <param name="customService">Supplies .srv text by <c>package/Name</c>, or null.</param>
+    public MsgCatalog(MsgTextResolver? custom = null, MsgTextResolver? customService = null)
+    {
+        _custom = custom;
+        _customService = customService;
+    }
 
     public MsgSpec Get(string fullType)
     {
@@ -163,6 +171,18 @@ public sealed class MsgCatalog
             throw new KeyNotFoundException($"no .msg definition available for '{fullType}'");
         MsgSpec spec = MsgSpec.Parse(fullType, text);
         _specs[fullType] = spec;
+        return spec;
+    }
+
+    /// <summary>The service spec for <c>package/Name</c>: custom resolver first, then the embedded set.</summary>
+    public SrvSpec GetService(string fullType)
+    {
+        if (_services.TryGetValue(fullType, out SrvSpec? cached)) return cached;
+        string? text = _customService?.Invoke(fullType) ?? EmbeddedMessages.FindService(fullType);
+        if (text is null)
+            throw new KeyNotFoundException($"no .srv definition available for '{fullType}'");
+        SrvSpec spec = SrvSpec.Parse(fullType, text);
+        _services[fullType] = spec;
         return spec;
     }
 }

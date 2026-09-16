@@ -99,6 +99,22 @@ public sealed class Ros2Node : IDisposable
         return new Ros2Service(serviceName, requests, replies, handler);
     }
 
+    /// <summary>
+    /// Serves a service with generated request/response classes, e.g.
+    /// <c>CreateService&lt;SetBool.Request, SetBool.Response&gt;("/set_bool", SetBool.RosType, req => …)</c>.
+    /// </summary>
+    public Ros2Service CreateService<TRequest, TResponse>(string serviceName, string serviceType, Func<TRequest, TResponse> handler)
+        where TRequest : IRos2Message, new()
+        where TResponse : IRos2Message =>
+        CreateService(serviceName, serviceType,
+            request => handler(Ros2MessageExtensions.FromPayload<TRequest>(request)).ToPayload());
+
+    /// <summary>Creates a typed client for a service (see <see cref="Ros2Client{TRequest, TResponse}"/>).</summary>
+    public Ros2Client<TRequest, TResponse> CreateClient<TRequest, TResponse>(string serviceName, string serviceType)
+        where TRequest : IRos2Message
+        where TResponse : IRos2Message, new() =>
+        new(CreateClient(serviceName, serviceType));
+
     /// <summary>Creates a client for a service, e.g. ("/add_two_ints", "example_interfaces/srv/AddTwoInts").</summary>
     public Ros2Client CreateClient(string serviceName, string serviceType)
     {

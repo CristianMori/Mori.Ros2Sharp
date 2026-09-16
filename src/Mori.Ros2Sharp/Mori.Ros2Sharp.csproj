@@ -8,11 +8,11 @@
     <RootNamespace>Mori.Ros2Sharp</RootNamespace>
 
     <PackageId>Mori.Ros2Sharp</PackageId>
-    <Version>0.4.0</Version>
+    <Version>0.5.0</Version>
     <PackageProjectUrl>https://github.com/CristianMori/Mori.Ros2Sharp</PackageProjectUrl>
     <RepositoryUrl>https://github.com/CristianMori/Mori.Ros2Sharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <Description>A ROS 2 node in pure managed C#: DDS-RTPS discovery, reliable pub/sub, graph participation, and services, implemented directly on raw UDP sockets with OMG CDR serialization — plus .msg-driven code generation via a bundled source generator. No native DDS libraries, no bridge, no ROS installation required.</Description>
+    <Description>A ROS 2 node in pure managed C#: DDS-RTPS discovery, reliable pub/sub, graph participation, and services, implemented directly on raw UDP sockets with OMG CDR serialization — plus .msg/.srv-driven code generation via a bundled source generator. No native DDS libraries, no bridge, no ROS installation required.</Description>
     <Authors>Cristian Mori</Authors>
     <Copyright>© 2026 Cristian Mori</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

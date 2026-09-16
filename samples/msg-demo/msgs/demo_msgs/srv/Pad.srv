@@ -1,0 +1,11 @@
+# A service whose reply is larger than its request, with a nested message on each side and
+# a constant: exercises the .srv path of the generator end to end.
+uint8 MAX_REPEAT=200
+
+string text
+uint8 repeat 1
+geometry_msgs/Point origin
+---
+bool ok
+string digest
+std_msgs/String padded

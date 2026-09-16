@@ -5,12 +5,12 @@ using Mori.Ros2Sharp.Msg;
 namespace Mori.Ros2Sharp.Generators;
 
 /// <summary>
-/// Generates typed C# message classes from .msg files included as AdditionalFiles. The package
-/// name comes from the file's directory ROS-style (<c>&lt;package&gt;/msg/Name.msg</c> or
-/// <c>&lt;package&gt;/Name.msg</c>); nested types resolve against the other AdditionalFiles
-/// first, then the embedded common-message set, and dependencies are emitted too so the code
-/// always compiles. The root namespace defaults to <c>Ros2Messages</c> and can be overridden
-/// with the <c>Ros2SharpNamespace</c> MSBuild property.
+/// Generates typed C# classes from .msg and .srv files included as AdditionalFiles. The
+/// package name comes from the file's directory ROS-style (<c>&lt;package&gt;/msg/Name.msg</c>,
+/// <c>&lt;package&gt;/srv/Name.srv</c>, or <c>&lt;package&gt;/Name.msg</c>); nested types resolve
+/// against the other AdditionalFiles first, then the embedded common set, and dependencies
+/// are emitted too so the code always compiles. The root namespace defaults to
+/// <c>Ros2Messages</c> and can be overridden with the <c>Ros2SharpNamespace</c> MSBuild property.
 /// </summary>
 [Generator]
 public sealed class Ros2MsgGenerator : IIncrementalGenerator
@@ -27,7 +27,8 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
     {
         IncrementalValueProvider<ImmutableArray<(string FullType, string Text, string Path)>> msgFiles =
             context.AdditionalTextsProvider
-                .Where(static f => f.Path.EndsWith(".msg", StringComparison.OrdinalIgnoreCase))
+                .Where(static f => f.Path.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) ||
+                                   f.Path.EndsWith(".srv", StringComparison.OrdinalIgnoreCase))
                 .Select(static (f, ct) => (FullTypeOf(f.Path), f.GetText(ct)?.ToString() ?? "", f.Path))
                 .Collect();
 
@@ -41,17 +42,19 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
             (ImmutableArray<(string FullType, string Text, string Path)> files, string ns) = input;
             if (files.Length == 0) return;
 
-            var sources = new Dictionary<string, string>();
-            foreach ((string fullType, string text, string _) in files)
-                sources[fullType] = text;
+            var messages = new Dictionary<string, string>();
+            var services = new Dictionary<string, string>();
+            foreach ((string fullType, string text, string path) in files)
+                (path.EndsWith(".srv", StringComparison.OrdinalIgnoreCase) ? services : messages)[fullType] = text;
 
-            var catalog = new MsgCatalog(fullType =>
-                sources.TryGetValue(fullType, out string? text) ? text : null);
+            var catalog = new MsgCatalog(
+                fullType => messages.TryGetValue(fullType, out string? text) ? text : null,
+                fullType => services.TryGetValue(fullType, out string? text) ? text : null);
 
             try
             {
                 foreach (KeyValuePair<string, string> generated in
-                         CSharpEmitter.EmitClosure(sources.Keys, catalog, ns, ""))
+                         CSharpEmitter.EmitClosure(messages.Keys, services.Keys.Concat(EmbeddedMessages.ServiceTypes), catalog, ns, ""))
                     spc.AddSource(generated.Key.Replace('/', '.') + ".g.cs", generated.Value);
             }
             catch (Exception ex)
@@ -61,7 +64,8 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
         });
     }
 
-    // ROS layout: <package>/msg/<Name>.msg — the package is the directory above "msg".
+    // ROS layout: <package>/msg/<Name>.msg or <package>/srv/<Name>.srv — the package is the
+    // directory above "msg"/"srv".
     private static string FullTypeOf(string path)
     {
         string name = Path.GetFileNameWithoutExtension(path);
@@ -70,7 +74,8 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
         if (dir is not null)
         {
             string leaf = Path.GetFileName(dir);
-            if (string.Equals(leaf, "msg", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(leaf, "msg", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(leaf, "srv", StringComparison.OrdinalIgnoreCase))
             {
                 string? parent = Path.GetDirectoryName(dir);
                 if (parent is not null) leaf = Path.GetFileName(parent);

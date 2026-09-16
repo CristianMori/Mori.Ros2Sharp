@@ -3,10 +3,39 @@ namespace Mori.Ros2Sharp.Msg;
 /// <summary>
 /// Bundled .msg texts for the common ROS 2 interface packages, taken verbatim from the
 /// Humble distribution: builtin_interfaces, std_msgs, geometry_msgs, sensor_msgs, nav_msgs,
-/// tf2_msgs. Keys are <c>package/Name</c>.
+/// tf2_msgs — and the std_srvs .srv texts. Keys are <c>package/Name</c>.
 /// </summary>
 public static class EmbeddedMessages
 {
+    /// <summary>
+    /// The bundled services. Nothing references a service the way messages reference nested
+    /// messages, so the generators emit these unconditionally: they are tiny and universal.
+    /// </summary>
+    public static readonly string[] ServiceTypes = { "std_srvs/Empty", "std_srvs/SetBool", "std_srvs/Trigger" };
+
+    /// <summary>The .srv text for <c>package/Name</c>, or null when not bundled (std_srvs only).</summary>
+    public static string? FindService(string fullType)
+    {
+        switch (fullType)
+        {
+            case "std_srvs/Empty": return @"
+---
+";
+            case "std_srvs/SetBool": return @"
+bool data # e.g. for hardware enabling / disabling
+---
+bool success   # indicate successful run of triggered service
+string message # informational, e.g. for error messages
+";
+            case "std_srvs/Trigger": return @"
+---
+bool success   # indicate successful run of triggered service
+string message # informational, e.g. for error messages
+";
+            default: return null;
+        }
+    }
+
     /// <summary>The .msg text for <c>package/Name</c>, or null when not bundled.</summary>
     public static string? Find(string fullType)
     {

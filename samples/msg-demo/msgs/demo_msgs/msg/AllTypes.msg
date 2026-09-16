@@ -21,3 +21,4 @@ std_msgs/String note
 geometry_msgs/Twist twist
 nav_msgs/Odometry odom
 builtin_interfaces/Duration timeout
+std_msgs/Empty nothing
