@@ -32,6 +32,7 @@ int payloadSize = trailing.Where(a => !a.Contains('.') && !a.Contains('=') && a 
 int lossPercent = trailing.Where(a => a.StartsWith("loss=")).Select(a => int.Parse(a[5..])).FirstOrDefault();
 int fragmentSize = trailing.Where(a => a.StartsWith("frag=")).Select(a => int.Parse(a[5..])).FirstOrDefault(); // frag=N sets the fragment size
 bool latched = trailing.Contains("latched"); // pub: transient-local, one message written at once; sub: transient-local subscription
+int dropAfter = trailing.Where(a => a.StartsWith("drop=")).Select(a => int.Parse(a[5..])).FirstOrDefault(); // withdraw our endpoint after N s, keep running
 
 if (mode == "node")
 {
@@ -118,11 +119,15 @@ foreach (string peer in peerArgs)
 participant.ParticipantDiscovered += (p, from) =>
     Console.WriteLine($"[+] {p.Guid.Prefix}  vendor={p.VendorId}  name={p.EntityName ?? "-"}  (from {from})");
 participant.ParticipantLost += p =>
-    Console.WriteLine($"[-] {p.Guid.Prefix}  lease expired");
+    Console.WriteLine($"[-] {p.Guid.Prefix}  gone (dispose or lease expiry)  {DateTime.Now:HH:mm:ss.fff}");
 participant.PublicationDiscovered += e =>
     Console.WriteLine($"[pub] {e.TopicName}  ({e.TypeName})  {(e.Reliable ? "reliable" : "best-effort")}");
 participant.SubscriptionDiscovered += e =>
     Console.WriteLine($"[sub] {e.TopicName}  ({e.TypeName})  {(e.Reliable ? "reliable" : "best-effort")}");
+participant.PublicationLost += e =>
+    Console.WriteLine($"[-pub] {e.TopicName}  ({e.TypeName})  {DateTime.Now:HH:mm:ss.fff}");
+participant.SubscriptionLost += e =>
+    Console.WriteLine($"[-sub] {e.TopicName}  ({e.TypeName})  {DateTime.Now:HH:mm:ss.fff}");
 participant.ReceiveError += ex =>
     Console.WriteLine($"[!] receive error: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
 
@@ -166,6 +171,13 @@ switch (mode)
         Console.WriteLine($"    first reader confirmed after {waitSw.ElapsedMilliseconds} ms: {ready}");
         while (DateTimeOffset.UtcNow < until)
         {
+            if (dropAfter > 0 && i >= dropAfter * 2)
+            {
+                Console.WriteLine($"    withdrawing the writer at {DateTime.Now:HH:mm:ss.fff}; staying alive");
+                writer.Dispose();
+                await Task.Delay(until - DateTimeOffset.UtcNow);
+                break;
+            }
             var w = new CdrWriter(CdrEncapsulation.CdrLe);
             string text = payloadSize > 0
                 ? DdsProbe.Loopback.Pattern(payloadSize, ++i)
@@ -198,7 +210,15 @@ switch (mode)
                 Console.WriteLine($"    got sn {d.SequenceNumber}: {text.Length} chars, {d.Payload.Length} payload bytes, " +
                                   $"sha256 {DdsProbe.Loopback.Sha(text)}  (from {writerGuid.Prefix})");
         };
-        await Task.Delay(TimeSpan.FromSeconds(seconds));
+        if (dropAfter > 0)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(dropAfter));
+            Console.WriteLine($"    withdrawing the reader at {DateTime.Now:HH:mm:ss.fff} ({reader.MatchedWriterCount} matched); staying alive");
+            reader.Dispose();
+            await Task.Delay(TimeSpan.FromSeconds(Math.Max(0, seconds - dropAfter)));
+        }
+        else
+            await Task.Delay(TimeSpan.FromSeconds(seconds));
         Console.WriteLine($"    fragment datagrams: {loss.Seen} received, {loss.Dropped} dropped");
         Console.WriteLine($"    received: {loss.Summary}");
         Console.WriteLine($"    sent back: {outgoing.Summary}");

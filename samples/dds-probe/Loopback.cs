@@ -248,6 +248,36 @@ internal static class Loopback
         Check("durability rule: transient-local subscription did not match the volatile publisher",
             wantsHistory.MatchedWriterCount == 0 && plain.MatchedReaderCount == 1, ref failures);
 
+        // Withdrawal: an endpoint removed on one side unmatches on the other through an SEDP
+        // dispose; a participant that leaves takes all its endpoints with it.
+        int talkerSubsLost = 0, listenerPubsLost = 0, listenerParticipantsLost = 0;
+        talker.Participant.SubscriptionLost += e => { if (e.TopicName == "rt/going") Interlocked.Increment(ref talkerSubsLost); };
+        listener.Participant.PublicationLost += e => { if (e.TopicName == "rt/going") Interlocked.Increment(ref listenerPubsLost); };
+        listener.Participant.ParticipantLost += _ => Interlocked.Increment(ref listenerParticipantsLost);
+        var goingPub = talker.CreatePublisher("/going", "std_msgs/msg/String");
+        var goingSub = listener.CreateSubscription("/going", "std_msgs/msg/String");
+        for (int i = 0; i < 100 && (goingPub.MatchedReaderCount == 0 || goingSub.MatchedWriterCount == 0); i++) await Task.Delay(50);
+        Check("withdrawal: /going matched both ways", goingPub.MatchedReaderCount == 1 && goingSub.MatchedWriterCount == 1, ref failures);
+        listener.RemoveSubscription(goingSub);
+        for (int i = 0; i < 100 && goingPub.MatchedReaderCount > 0; i++) await Task.Delay(50);
+        Check("withdrawal: removed subscription unmatched from the publisher", goingPub.MatchedReaderCount == 0 && talkerSubsLost == 1, ref failures);
+        var goingSub2 = listener.CreateSubscription("/going", "std_msgs/msg/String");
+        for (int i = 0; i < 100 && goingSub2.MatchedWriterCount == 0; i++) await Task.Delay(50);
+        talker.RemovePublisher(goingPub);
+        for (int i = 0; i < 100 && goingSub2.MatchedWriterCount > 0; i++) await Task.Delay(50);
+        Check("withdrawal: removed publisher unmatched from the subscription", goingSub2.MatchedWriterCount == 0 && listenerPubsLost == 1, ref failures);
+
+        var third = new Ros2Node("loop_third");
+        var thirdPub = third.CreatePublisher("/going", "std_msgs/msg/String");
+        third.Start();
+        for (int i = 0; i < 200 && (goingSub2.MatchedWriterCount == 0 || thirdPub.MatchedReaderCount == 0); i++) await Task.Delay(50);
+        Check($"withdrawal: third node's publisher matched (sub sees {goingSub2.MatchedWriterCount} writer(s), pub sees {thirdPub.MatchedReaderCount} reader(s))",
+            goingSub2.MatchedWriterCount == 1 && thirdPub.MatchedReaderCount == 1, ref failures);
+        third.Dispose();
+        for (int i = 0; i < 100 && goingSub2.MatchedWriterCount > 0; i++) await Task.Delay(50);
+        Check("withdrawal: leaving participant took its publisher with it",
+            goingSub2.MatchedWriterCount == 0 && listenerPubsLost == 2 && listenerParticipantsLost == 1, ref failures);
+
         Console.WriteLine(failures == 0 ? "loopback passed" : $"{failures} loopback check(s) FAILED");
         return failures == 0 ? 0 : 1;
     }

@@ -6,7 +6,7 @@ namespace Mori.Ros2Sharp;
 /// A local RTPS writer: keeps a bounded history, pushes DATA to matched readers, and answers
 /// the reliability protocol (periodic HEARTBEAT, retransmit or GAP on ACKNACK).
 /// </summary>
-public sealed class RtpsWriterEndpoint
+public sealed class RtpsWriterEndpoint : IDisposable
 {
     private readonly RtpsParticipant _participant;
     private readonly List<Sample> _history = new();
@@ -24,7 +24,11 @@ public sealed class RtpsWriterEndpoint
 
     public int MatchedReaderCount { get { lock (_lock) return _readers.Count; } }
 
-    private sealed record Sample(long Sn, byte[] Payload, RtpsTime Timestamp, RtpsGuid? RelatedGuid, long RelatedSn);
+    // Instance is the key hash of a keyed sample (SEDP endpoint announcements are keyed by
+    // endpoint guid); a sample with an Instance and no payload is a dispose of that instance.
+    private sealed record Sample(long Sn, byte[] Payload, RtpsTime Timestamp, RtpsGuid? RelatedGuid, long RelatedSn, RtpsGuid? Instance);
+
+    private bool _disposed;
 
     private sealed class Remote
     {
@@ -85,14 +89,43 @@ public sealed class RtpsWriterEndpoint
     }
 
     /// <summary>Writes one serialized payload (starting with its encapsulation header).</summary>
-    public long Write(byte[] payload) => WriteCore(payload, null, 0, selfRelated: false);
+    public long Write(byte[] payload) => WriteCore(payload, null, 0, selfRelated: false, instance: null);
 
     /// <summary>Writes with a related sample identity in inline QoS (service replies).</summary>
     public long Write(byte[] payload, RtpsGuid relatedGuid, long relatedSn) =>
-        WriteCore(payload, relatedGuid, relatedSn, selfRelated: false);
+        WriteCore(payload, relatedGuid, relatedSn, selfRelated: false, instance: null);
 
     /// <summary>Writes carrying the sample's own identity as the related one (service requests).</summary>
-    public long WriteSelfRelated(byte[] payload) => WriteCore(payload, null, 0, selfRelated: true);
+    public long WriteSelfRelated(byte[] payload) => WriteCore(payload, null, 0, selfRelated: true, instance: null);
+
+    /// <summary>
+    /// Writes a sample of a keyed instance (DDS-level: SEDP announcements are keyed by the
+    /// endpoint guid). An earlier sample of the same instance still in history is replaced,
+    /// so late joiners see only the current state.
+    /// </summary>
+    public long WriteInstance(byte[] payload, RtpsGuid instance) =>
+        WriteCore(payload, null, 0, selfRelated: false, instance: instance);
+
+    /// <summary>
+    /// Announces that a keyed instance is gone: a payload-less sample carrying the key hash
+    /// and a disposed/unregistered status. Earlier samples of the instance leave history.
+    /// </summary>
+    public long DisposeInstance(RtpsGuid instance) =>
+        WriteCore(Array.Empty<byte>(), null, 0, selfRelated: false, instance: instance);
+
+    /// <summary>
+    /// Withdraws the writer: readers are told through discovery that it no longer exists,
+    /// and the participant stops routing to it.
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
+        _participant.RemoveWriter(this);
+    }
 
     /// <summary>
     /// Blocks until every matched reader has acknowledged every sample written so far, or the
@@ -112,7 +145,7 @@ public sealed class RtpsWriterEndpoint
         }
     }
 
-    private long WriteCore(byte[] payload, RtpsGuid? relatedGuid, long relatedSn, bool selfRelated)
+    private long WriteCore(byte[] payload, RtpsGuid? relatedGuid, long relatedSn, bool selfRelated, RtpsGuid? instance)
     {
         Sample s;
         List<Remote> readers;
@@ -120,7 +153,8 @@ public sealed class RtpsWriterEndpoint
         {
             long sn = _nextSn++;
             if (selfRelated) { relatedGuid = Guid; relatedSn = sn; }
-            s = new Sample(sn, payload, RtpsTime.FromDateTime(DateTimeOffset.UtcNow), relatedGuid, relatedSn);
+            s = new Sample(sn, payload, RtpsTime.FromDateTime(DateTimeOffset.UtcNow), relatedGuid, relatedSn, instance);
+            if (instance != null) _history.RemoveAll(x => x.Instance == instance); // one sample per instance
             _history.Add(s);
             if (_history.Count > _depth) _history.RemoveAt(0);
             readers = _readers.ToList();
@@ -194,7 +228,7 @@ public sealed class RtpsWriterEndpoint
         var readerGuid = new RtpsGuid(source, an.ReaderId);
         Remote? reader;
         var resend = new List<Sample>();
-        long firstAvailable;
+        var irrelevant = new List<long>(); // requested, but never going to be sent
         lock (_lock)
         {
             reader = _readers.FirstOrDefault(r => r.Guid == readerGuid);
@@ -202,20 +236,33 @@ public sealed class RtpsWriterEndpoint
             reader.LastAckNackCount = an.Count;
             reader.Confirmed = true;
             reader.AckedBefore = Math.Max(reader.AckedBefore, an.BaseSn);
-            // Below this the reader gets a GAP: history no longer holds it, or the reader
-            // is volatile and the sample predates its match.
-            firstAvailable = Math.Max(_history.Count > 0 ? _history[0].Sn : _nextSn, reader.RelevantFrom);
             foreach (long sn in an.Missing)
             {
-                if (sn < firstAvailable) continue;
-                var s = _history.FirstOrDefault(x => x.Sn == sn);
+                if (sn >= _nextSn) continue; // not written yet; a later heartbeat covers it
+                // A GAP for anything we will not send: written before a volatile reader
+                // matched, evicted from history, or replaced by a newer sample of the same
+                // keyed instance (a hole inside history). Without it an in-order reader
+                // waits for the sample forever.
+                var s = sn >= reader.RelevantFrom ? _history.FirstOrDefault(x => x.Sn == sn) : null;
                 if (s != null) resend.Add(s);
+                else irrelevant.Add(sn);
             }
         }
         foreach (var s in resend) SendData(reader, s);
-        if (an.Missing.Any(sn => sn < firstAvailable))
-            _participant.SendDirected(readerGuid.Prefix, reader.Locators,
-                w => w.AddGap(readerGuid.Entity, Guid.Entity, an.BaseSn, firstAvailable));
+        if (irrelevant.Count > 0)
+            _participant.SendDirected(readerGuid.Prefix, reader.Locators, w =>
+            {
+                // One GAP per contiguous run of irrelevant sequence numbers.
+                irrelevant.Sort();
+                long start = irrelevant[0], end = start;
+                foreach (long sn in irrelevant.Skip(1))
+                {
+                    if (sn == end + 1) { end = sn; continue; }
+                    w.AddGap(readerGuid.Entity, Guid.Entity, start, end + 1);
+                    start = end = sn;
+                }
+                w.AddGap(readerGuid.Entity, Guid.Entity, start, end + 1);
+            });
     }
 
     /// <summary>
@@ -264,9 +311,31 @@ public sealed class RtpsWriterEndpoint
                 w => w.AddGap(readerGuid.Entity, Guid.Entity, nf.SequenceNumber, nf.SequenceNumber + 1));
     }
 
-    // One DATA when the sample fits a datagram, DATA_FRAG runs otherwise.
+    /// <summary>Forgets a remote reader (its endpoint or participant went away).</summary>
+    internal void UnmatchReader(RtpsGuid readerGuid)
+    {
+        lock (_lock) _readers.RemoveAll(r => r.Guid == readerGuid);
+    }
+
+    /// <summary>Forgets every remote reader belonging to one participant.</summary>
+    internal void UnmatchParticipant(GuidPrefix prefix)
+    {
+        lock (_lock) _readers.RemoveAll(r => r.Guid.Prefix == prefix);
+    }
+
+    // One DATA when the sample fits a datagram, DATA_FRAG runs otherwise; a dispose is a
+    // payload-less DATA carrying the instance key.
     private void SendData(Remote reader, Sample s)
     {
+        if (s.Payload.Length == 0 && s.Instance is { } gone)
+        {
+            _participant.SendDirected(reader.Guid.Prefix, reader.Locators, w =>
+            {
+                w.AddInfoTimestamp(s.Timestamp);
+                w.AddDisposeData(reader.Guid.Entity, Guid.Entity, s.Sn, gone);
+            });
+            return;
+        }
         if (s.Payload.Length > _participant.MaxUnfragmentedPayload)
         {
             SendFragments(reader, s, null);
@@ -337,11 +406,47 @@ public sealed class RtpsWriterEndpoint
 /// A local RTPS reader: accepts DATA from matched writers (with duplicate suppression), answers
 /// HEARTBEATs with ACKNACKs, and honors GAPs.
 /// </summary>
-public sealed class RtpsReaderEndpoint
+public sealed class RtpsReaderEndpoint : IDisposable
 {
     private readonly RtpsParticipant _participant;
     private readonly Dictionary<RtpsGuid, Remote> _writers = new();
     private readonly object _lock = new();
+    private bool _disposed;
+
+    /// <summary>
+    /// Raised when a matched writer disposes a keyed instance: writer guid and the 16-byte
+    /// key hash. Discovery uses this to learn that a remote endpoint is gone; ROS 2 topics
+    /// are keyless, so user readers never see it.
+    /// </summary>
+    public event Action<RtpsGuid, byte[]>? InstanceDisposed;
+
+    /// <summary>
+    /// Withdraws the reader: writers are told through discovery that it no longer exists,
+    /// and the participant stops routing to it.
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
+        _participant.RemoveReader(this);
+    }
+
+    /// <summary>Forgets a remote writer (its endpoint or participant went away), pending fragments included.</summary>
+    internal void UnmatchWriter(RtpsGuid writerGuid)
+    {
+        lock (_lock) _writers.Remove(writerGuid);
+    }
+
+    /// <summary>Forgets every remote writer belonging to one participant.</summary>
+    internal void UnmatchParticipant(GuidPrefix prefix)
+    {
+        lock (_lock)
+            foreach (var g in _writers.Keys.Where(g => g.Prefix == prefix).ToList())
+                _writers.Remove(g);
+    }
 
     public RtpsGuid Guid { get; }
     public string TopicName { get; }
@@ -551,13 +656,22 @@ public sealed class RtpsReaderEndpoint
         if (d.ReaderId != EntityId.Unknown && d.ReaderId != Guid.Entity) return false; // addressed elsewhere
         var writerGuid = new RtpsGuid(source, d.WriterId);
         var deliver = new List<RtpsData>();
+        bool dispose;
         lock (_lock)
         {
             if (!_writers.TryGetValue(writerGuid, out var r)) return false;
-            if (d.Payload.Length == 0) return true; // dispose/unregister — endpoint removal, later
             if (d.SequenceNumber < r.ContiguousBefore || !r.Received.Add(d.SequenceNumber)) return true;
             Advance(r);
-            Accept(r, d, deliver);
+            // A payload-less sample is a dispose/unregister of a keyed instance: it counts
+            // toward reliability like any sample (or the writer would be asked for it
+            // forever) but is reported through InstanceDisposed, not as data.
+            dispose = d.Payload.Length == 0;
+            if (!dispose) Accept(r, d, deliver);
+        }
+        if (dispose)
+        {
+            if (d.Disposed && d.KeyHash is { Length: 16 } key) InstanceDisposed?.Invoke(writerGuid, key);
+            return true;
         }
         Deliver(writerGuid, deliver);
         return true;

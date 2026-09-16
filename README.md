@@ -16,7 +16,7 @@ package, `new Ros2Node(...)`, and the process shows up on the ROS graph like any
 |---|---|
 | **Serialization** | OMG CDR (XCDR1) little-endian reader/writer with correct alignment — the wire format of every ROS 2 message |
 | **Discovery** | SPDP participant discovery over multicast and unicast initial peers; lease tracking; immediate departure announcements (dispose) on shutdown |
-| **Endpoints** | SEDP endpoint discovery in both directions, with reliability/durability compatibility matching |
+| **Endpoints** | SEDP endpoint discovery in both directions, with reliability/durability compatibility matching; endpoint withdrawal (dispose) both ways, and unmatching when a participant leaves |
 | **Pub/sub** | Reliable and best-effort writers and readers: bounded history, in-order delivery, HEARTBEAT/ACKNACK retransmission, GAP handling, duplicate suppression; latched topics (transient-local durability) in both directions; large samples (images, point clouds) fragmented and reassembled with DATA_FRAG/NACK_FRAG recovery |
 | **Graph** | `ros_discovery_info` participation — the node appears in `ros2 node list`, its topics in `ros2 topic list` |
 | **Services** | Both sides: serve a service that `ros2 service call` can invoke, or call an existing ROS 2 service, with request/response correlation |
@@ -78,6 +78,10 @@ var sub = node.CreateSubscription("/tf_static", "tf2_msgs/msg/TFMessage", transi
 Messages that arrive before a handler is attached to `DataReceived` are held (the most recent
 64) and delivered to the first handler, so latched history is never missed by subscribing on
 one line and attaching on the next.
+
+Publishers and subscriptions can be withdrawn while the node keeps running
+(`node.RemovePublisher(pub)`, `node.RemoveSubscription(sub)`): the other side is told through
+discovery and unmatches at once, exactly as it does when a whole node exits.
 
 A service server (`std_srvs/srv/SetBool`):
 
@@ -155,7 +159,8 @@ dotnet run --project samples/dds-probe -- loopback      # two in-process nodes e
 samples; `sub` prints the size and checksum of every sample it receives. `loss=N` on `pub`,
 `sub`, or as the loopback's second argument (`loopback 1000000 30`) drops N% of fragment
 datagrams to exercise retransmission. `latched` makes `pub` a transient-local publisher that
-writes once and waits, and `sub` a transient-local subscription.
+writes once and waits, and `sub` a transient-local subscription. `drop=N` withdraws the
+endpoint after N seconds while the process stays alive, to watch the other side unmatch.
 
 Every mode accepts trailing peer addresses for networks where multicast cannot reach the
 other side (containers, VMs, WSL): `dds-probe pub 0 30 192.168.1.20`. The library announces

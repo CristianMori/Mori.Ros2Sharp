@@ -67,6 +67,22 @@ public sealed class Ros2Node : IDisposable
         return reader;
     }
 
+    /// <summary>Withdraws a publisher created by <see cref="CreatePublisher"/> and updates the graph.</summary>
+    public void RemovePublisher(RtpsWriterEndpoint publisher)
+    {
+        publisher.Dispose();
+        lock (_lock) _writerGids.Remove(publisher.Guid);
+        PublishGraph();
+    }
+
+    /// <summary>Withdraws a subscription created by <see cref="CreateSubscription"/> and updates the graph.</summary>
+    public void RemoveSubscription(RtpsReaderEndpoint subscription)
+    {
+        subscription.Dispose();
+        lock (_lock) _readerGids.Remove(subscription.Guid);
+        PublishGraph();
+    }
+
     /// <summary>Serves a service, e.g. ("/add_two_ints", "example_interfaces/srv/AddTwoInts", …).</summary>
     public Ros2Service CreateService(string serviceName, string serviceType, Func<byte[], byte[]> handler)
     {

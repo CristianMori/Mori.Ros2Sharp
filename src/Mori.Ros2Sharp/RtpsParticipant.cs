@@ -98,6 +98,12 @@ public sealed class RtpsParticipant : IDisposable
     /// <summary>Raised for every remote subscription learned through SEDP.</summary>
     public event Action<EndpointData>? SubscriptionDiscovered;
 
+    /// <summary>Raised when a remote publication is withdrawn, or its participant is lost.</summary>
+    public event Action<EndpointData>? PublicationLost;
+
+    /// <summary>Raised when a remote subscription is withdrawn, or its participant is lost.</summary>
+    public event Action<EndpointData>? SubscriptionLost;
+
     /// <summary>
     /// Raised when handling a received datagram threw. The receive loop carries on regardless;
     /// this exists so such failures are visible instead of silently dropping traffic.
@@ -144,6 +150,8 @@ public sealed class RtpsParticipant : IDisposable
             new RtpsGuid(Guid.Prefix, EntityId.SedpSubscriptionsReader), "", "", reliable: true);
         _sedpPublicationsReader.DataReceived += (_, payload, _) => OnRemotePublication(payload);
         _sedpSubscriptionsReader.DataReceived += (_, payload, _) => OnRemoteSubscription(payload);
+        _sedpPublicationsReader.InstanceDisposed += (_, key) => RemoveRemotePublication(RtpsGuid.ReadFrom(key));
+        _sedpSubscriptionsReader.InstanceDisposed += (_, key) => RemoveRemoteSubscription(RtpsGuid.ReadFrom(key));
     }
 
     /// <summary>Starts the discovery, receive, and reliability loops.</summary>
@@ -185,8 +193,26 @@ public sealed class RtpsParticipant : IDisposable
         foreach (var s in subs)
             if (QosCompatible(reliable, transientLocal, s.Reliable, s.TransientLocal))
                 writer.MatchReader(s.Guid, ResolveLocators(s), s.TransientLocal);
-        _sedpPublicationsWriter.Write(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal).Encode());
+        _sedpPublicationsWriter.WriteInstance(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal).Encode(), guid);
         return writer;
+    }
+
+    /// <summary>Withdraws a local writer: SEDP dispose to every participant, no more routing to it.</summary>
+    internal void RemoveWriter(RtpsWriterEndpoint writer)
+    {
+        bool removed;
+        lock (_writers) removed = _writers.Remove(writer);
+        if (!removed) return;
+        _sedpPublicationsWriter.DisposeInstance(writer.Guid);
+    }
+
+    /// <summary>Withdraws a local reader: SEDP dispose to every participant, no more routing to it.</summary>
+    internal void RemoveReader(RtpsReaderEndpoint reader)
+    {
+        bool removed;
+        lock (_readers) removed = _readers.Remove(reader);
+        if (!removed) return;
+        _sedpSubscriptionsWriter.DisposeInstance(reader.Guid);
     }
 
     /// <summary>
@@ -205,7 +231,7 @@ public sealed class RtpsParticipant : IDisposable
         foreach (var p in pubs)
             if (QosCompatible(p.Reliable, p.TransientLocal, reliable, transientLocal))
                 reader.MatchWriter(p.Guid, ResolveLocators(p));
-        _sedpSubscriptionsWriter.Write(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal).Encode());
+        _sedpSubscriptionsWriter.WriteInstance(LocalEndpointData(guid, topicName, typeName, reliable, transientLocal).Encode(), guid);
         return reader;
     }
 
@@ -553,7 +579,7 @@ public sealed class RtpsParticipant : IDisposable
             lock (_remote)
                 if (_remote.TryGetValue(prefix, out gone))
                     _remote.Remove(prefix);
-            if (gone != null) ParticipantLost?.Invoke(gone);
+            if (gone != null) ForgetParticipant(gone);
             return;
         }
         if (!ParticipantData.TryDecode(d.Payload, out var pd)) return;
@@ -652,6 +678,46 @@ public sealed class RtpsParticipant : IDisposable
         }
         if (lost != null)
             foreach (var pd in lost)
-                ParticipantLost?.Invoke(pd);
+                ForgetParticipant(pd);
+    }
+
+    /// <summary>
+    /// A participant is gone (dispose or lease expiry): every endpoint of its is withdrawn,
+    /// every local endpoint unmatched from it, builtins included, then ParticipantLost.
+    /// </summary>
+    private void ForgetParticipant(ParticipantData pd)
+    {
+        var prefix = pd.Guid.Prefix;
+        List<EndpointData> pubs, subs;
+        lock (_remotePublications)
+        {
+            pubs = _remotePublications.Values.Where(e => e.Guid.Prefix == prefix).ToList();
+            subs = _remoteSubscriptions.Values.Where(e => e.Guid.Prefix == prefix).ToList();
+        }
+        foreach (var e in pubs) RemoveRemotePublication(e.Guid);
+        foreach (var e in subs) RemoveRemoteSubscription(e.Guid);
+        foreach (var w in AllWriters()) w.UnmatchParticipant(prefix);
+        foreach (var r in AllReaders()) r.UnmatchParticipant(prefix);
+        ParticipantLost?.Invoke(pd);
+    }
+
+    /// <summary>A remote writer is gone: unmatch it from every local reader.</summary>
+    private void RemoveRemotePublication(RtpsGuid guid)
+    {
+        EndpointData? e;
+        lock (_remotePublications)
+            if (!_remotePublications.Remove(guid, out e)) return;
+        foreach (var r in AllReaders()) r.UnmatchWriter(guid);
+        PublicationLost?.Invoke(e!);
+    }
+
+    /// <summary>A remote reader is gone: unmatch it from every local writer.</summary>
+    private void RemoveRemoteSubscription(RtpsGuid guid)
+    {
+        EndpointData? e;
+        lock (_remotePublications)
+            if (!_remoteSubscriptions.Remove(guid, out e)) return;
+        foreach (var w in AllWriters()) w.UnmatchReader(guid);
+        SubscriptionLost?.Invoke(e!);
     }
 }

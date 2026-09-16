@@ -8,7 +8,7 @@
     <RootNamespace>Mori.Ros2Sharp</RootNamespace>
 
     <PackageId>Mori.Ros2Sharp</PackageId>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <PackageProjectUrl>https://github.com/CristianMori/Mori.Ros2Sharp</PackageProjectUrl>
     <RepositoryUrl>https://github.com/CristianMori/Mori.Ros2Sharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

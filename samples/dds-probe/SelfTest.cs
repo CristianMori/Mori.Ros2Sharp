@@ -192,6 +192,26 @@ internal static class SelfTest
         reader.OnDataFrag(pd.Guid.Prefix, Frag(1, big, 1, 4));
         Check("frag: completed sample not delivered twice", delivered.Count == 2);
 
+        // A dispose sample at a reader: reported through InstanceDisposed with the key, never as
+        // data, and it counts as received so it is not requested again.
+        var dReader = new RtpsReaderEndpoint(null!, new RtpsGuid(GuidPrefix.NewUnique(), fragReader), "t", "T", reliable: true);
+        dReader.MatchWriter(fragWriterGuid, Array.Empty<IPEndPoint>());
+        int dataEvents = 0;
+        byte[]? disposedKey = null;
+        dReader.DataReceived += (_, _, _) => dataEvents++;
+        dReader.InstanceDisposed += (_, key) => disposedKey = key;
+        var goneEndpoint = new RtpsGuid(pd.Guid.Prefix, new EntityId(0x00000103));
+        var mw6 = new RtpsMessageWriter(pd.Guid.Prefix);
+        mw6.AddDisposeData(fragReader, fragWriter, 1, goneEndpoint);
+        RtpsMessage.TryParse(mw6.ToArray(), out var msg6);
+        Span<byte> goneKey = stackalloc byte[16];
+        goneEndpoint.WriteTo(goneKey);
+        Check("dispose sample: reported with its key, not as data",
+            dReader.OnData(pd.Guid.Prefix, msg6!.Data[0]) && dataEvents == 0 &&
+            disposedKey != null && disposedKey.AsSpan().SequenceEqual(goneKey));
+        Check("dispose sample: duplicate ignored",
+            dReader.OnData(pd.Guid.Prefix, msg6.Data[0]) && dataEvents == 0);
+
         // rmw_dds_common/ParticipantEntitiesInfo layout (Humble: gids are char[24]).
         var pguid = new RtpsGuid(pd.Guid.Prefix, EntityId.Participant);
         byte[] pei = Ros2Node.EncodeParticipantEntitiesInfo(pguid, "/", "probe",
