@@ -248,7 +248,8 @@ dotnet test tests/Mori.Ros2Sharp.Tests
 The tests run the wire-format self-test, the generated-code checks, and the in-process
 loopback (two nodes exchanging fragmented samples, with and without injected loss) under
 xunit; the same suites are runnable by hand through `dds-probe selftest`, `msg-demo`, and
-`dds-probe loopback`. CI runs them on every push.
+`dds-probe loopback`. The in-process nodes use ROS domain 200, so the tests neither see nor
+disturb a ROS 2 system on the same network. CI runs them on every push.
 
 ## License
 

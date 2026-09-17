@@ -181,8 +181,9 @@ internal static class Checks
 
         // A typed service call between two in-process nodes.
         {
-            using var server = new Ros2Node("msg_demo_server");
-            using var caller = new Ros2Node("msg_demo_caller");
+            // A private domain: the check must never meet a ROS 2 system on the same network.
+            using var server = new Ros2Node("msg_demo_server", "/", 200);
+            using var caller = new Ros2Node("msg_demo_caller", "/", 200);
             server.AddPeer(System.Net.IPAddress.Loopback);
             caller.AddPeer(System.Net.IPAddress.Loopback);
             server.CreateService<Ros2Messages.demo_msgs.Pad.Request, Ros2Messages.demo_msgs.Pad.Response>(

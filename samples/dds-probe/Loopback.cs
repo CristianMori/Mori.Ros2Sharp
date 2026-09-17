@@ -61,7 +61,7 @@ internal static class Loopback
                     }
                 Fragments += m!.DataFrags.Sum(f => f.FragmentsInSubmessage);
                 FragmentSubmessages += m.DataFrags.Count;
-                if (Requests.Count < 400)
+                if (Requests.Count < 4000)
                 {
                     string t = DateTimeOffset.UtcNow.ToString("HH:mm:ss.fff");
                     foreach (var nf in m.NackFrags)
@@ -71,7 +71,7 @@ internal static class Loopback
                     foreach (var hb in m.Heartbeats)
                         Requests.Add($"{t} HEARTBEAT wr {hb.WriterId} rd {hb.ReaderId} {hb.FirstSn}..{hb.LastSn}{(hb.Final ? " final" : "")}");
                     foreach (var d in m.Data)
-                        Requests.Add($"{t} DATA wr {d.WriterId} rd {d.ReaderId} sn {d.SequenceNumber} ({d.Payload.Length} bytes)");
+                        Requests.Add($"{t} DATA wr {d.WriterId} rd {d.ReaderId} sn {d.SequenceNumber} ({d.Payload.Length} bytes{(d.Disposed ? ", disposed" : "")})");
                     foreach (var g in m.Gaps)
                         Requests.Add($"{t} GAP wr {g.WriterId} rd {g.ReaderId} [{g.GapStart}, {g.GapListBase})");
                 }
@@ -98,12 +98,18 @@ internal static class Loopback
 
     private static Action<string, bool>? _report;
 
+    /// <summary>
+    /// The ROS domain the in-process nodes use: a private one, so the exchange never meets a
+    /// ROS 2 system running on the same network (or a second copy of itself on another host).
+    /// </summary>
+    public const int Domain = 200;
+
     /// <summary>Runs the whole exchange; <paramref name="report"/> (name, passed) sees each check as it runs.</summary>
     public static async Task<int> Run(int size, int lossPercent, int count = 10, Action<string, bool>? report = null)
     {
         _report = report;
-        using var talker = new Ros2Node("loop_talker");
-        using var listener = new Ros2Node("loop_listener");
+        using var talker = new Ros2Node("loop_talker", "/", Domain);
+        using var listener = new Ros2Node("loop_listener", "/", Domain);
         // Unicast to the local slots as well: discovery then works where multicast does not
         // loop back (some CI runners).
         talker.AddPeer(System.Net.IPAddress.Loopback);
@@ -142,7 +148,7 @@ internal static class Loopback
         talker.Start();
         listener.Start();
         Console.WriteLine($"loopback: {count} samples of {size:N0} chars each, fragment size {talker.Participant.FragmentSize:N0}, " +
-                          $"simulated fragment loss {lossPercent}%");
+                          $"simulated fragment loss {lossPercent}%, domain {Domain}");
 
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < 100 && (sub.MatchedWriterCount == 0 || pub.MatchedReaderCount == 0 || !client.ServerAvailable); i++)
@@ -259,23 +265,46 @@ internal static class Loopback
         // Withdrawal: an endpoint removed on one side unmatches on the other through an SEDP
         // dispose; a participant that leaves takes all its endpoints with it.
         int talkerSubsLost = 0, listenerPubsLost = 0, listenerParticipantsLost = 0;
-        talker.Participant.SubscriptionLost += e => { if (e.TopicName == "rt/going") Interlocked.Increment(ref talkerSubsLost); };
+        var events = new List<string>();
+        talker.Participant.SubscriptionLost += e =>
+        {
+            lock (events) events.Add($"{DateTimeOffset.UtcNow:HH:mm:ss.fff} talker SubscriptionLost {e.TopicName} {e.Guid}");
+            if (e.TopicName == "rt/going") Interlocked.Increment(ref talkerSubsLost);
+        };
+        talker.Participant.ReceiveError += ex => { lock (events) events.Add($"{DateTimeOffset.UtcNow:HH:mm:ss.fff} talker ReceiveError {ex}"); };
+        listener.Participant.ReceiveError += ex => { lock (events) events.Add($"{DateTimeOffset.UtcNow:HH:mm:ss.fff} listener ReceiveError {ex}"); };
         listener.Participant.PublicationLost += e => { if (e.TopicName == "rt/going") Interlocked.Increment(ref listenerPubsLost); };
         listener.Participant.ParticipantLost += _ => Interlocked.Increment(ref listenerParticipantsLost);
+        var talkerIn = new FragmentLoss(0);
+        talker.Participant.DropIncoming = talkerIn.Drop;
         var goingPub = talker.CreatePublisher("/going", "std_msgs/msg/String");
         var goingSub = listener.CreateSubscription("/going", "std_msgs/msg/String");
         for (int i = 0; i < 100 && (goingPub.MatchedReaderCount == 0 || goingSub.MatchedWriterCount == 0); i++) await Task.Delay(50);
         Check("withdrawal: /going matched both ways", goingPub.MatchedReaderCount == 1 && goingSub.MatchedWriterCount == 1, ref failures);
+        string removedAt = DateTimeOffset.UtcNow.ToString("HH:mm:ss.fff");
         listener.RemoveSubscription(goingSub);
-        for (int i = 0; i < 100 && goingPub.MatchedReaderCount > 0; i++) await Task.Delay(50);
-        Check("withdrawal: removed subscription unmatched from the publisher", goingPub.MatchedReaderCount == 0 && talkerSubsLost == 1, ref failures);
+        // The participant unmatches first and raises the lost event right after; a poll can
+        // land between the two, so wait for both.
+        for (int i = 0; i < 100 && (goingPub.MatchedReaderCount > 0 || Volatile.Read(ref talkerSubsLost) == 0); i++) await Task.Delay(50);
+        bool unmatched = goingPub.MatchedReaderCount == 0 && talkerSubsLost == 1;
+        Check($"withdrawal: removed subscription unmatched from the publisher (matched {goingPub.MatchedReaderCount}, lost events {talkerSubsLost})", unmatched, ref failures);
+        if (!unmatched)
+        {
+            // What the talker received from the listener's SEDP subscriptions writer (000004c2)
+            // around the removal: the dispose sample should be among it.
+            Console.WriteLine($"      subscription removed at {removedAt}; removed reader guid {goingSub.Guid}");
+            lock (talkerIn)
+                foreach (var line in talkerIn.Requests.Where(l => l.Contains("wr 000004c2") || l.Contains("GAP")).TakeLast(40))
+                    Console.WriteLine($"      talker in  {line}");
+            lock (events) foreach (var line in events) Console.WriteLine($"      event  {line}");
+        }
         var goingSub2 = listener.CreateSubscription("/going", "std_msgs/msg/String");
         for (int i = 0; i < 100 && goingSub2.MatchedWriterCount == 0; i++) await Task.Delay(50);
         talker.RemovePublisher(goingPub);
-        for (int i = 0; i < 100 && goingSub2.MatchedWriterCount > 0; i++) await Task.Delay(50);
+        for (int i = 0; i < 100 && (goingSub2.MatchedWriterCount > 0 || Volatile.Read(ref listenerPubsLost) == 0); i++) await Task.Delay(50);
         Check("withdrawal: removed publisher unmatched from the subscription", goingSub2.MatchedWriterCount == 0 && listenerPubsLost == 1, ref failures);
 
-        var third = new Ros2Node("loop_third");
+        var third = new Ros2Node("loop_third", "/", Domain);
         third.AddPeer(System.Net.IPAddress.Loopback);
         var thirdPub = third.CreatePublisher("/going", "std_msgs/msg/String");
         third.Start();
@@ -283,7 +312,8 @@ internal static class Loopback
         Check($"withdrawal: third node's publisher matched (sub sees {goingSub2.MatchedWriterCount} writer(s), pub sees {thirdPub.MatchedReaderCount} reader(s))",
             goingSub2.MatchedWriterCount == 1 && thirdPub.MatchedReaderCount == 1, ref failures);
         third.Dispose();
-        for (int i = 0; i < 100 && goingSub2.MatchedWriterCount > 0; i++) await Task.Delay(50);
+        for (int i = 0; i < 100 && (goingSub2.MatchedWriterCount > 0 || Volatile.Read(ref listenerPubsLost) < 2 || Volatile.Read(ref listenerParticipantsLost) == 0); i++)
+            await Task.Delay(50);
         Check("withdrawal: leaving participant took its publisher with it",
             goingSub2.MatchedWriterCount == 0 && listenerPubsLost == 2 && listenerParticipantsLost == 1, ref failures);
 
