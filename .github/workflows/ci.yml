@@ -18,7 +18,25 @@ jobs:
       - name: Build
         run: dotnet build Mori.Ros2Sharp.slnx -c Release
       - name: Test
-        run: dotnet test tests/Mori.Ros2Sharp.Tests -c Release --no-build --logger "console;verbosity=normal"
+        run: >
+          dotnet test tests/Mori.Ros2Sharp.Tests -c Release --no-build
+          --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx"
+          --results-directory results
+      # A failed test becomes an annotation with its message, so the cause is visible on the
+      # run page and through the checks API without opening the log.
+      - name: Annotate failures
+        if: failure()
+        shell: python
+        run: |
+          import glob, re, xml.etree.ElementTree as ET
+          ns = {'t': 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010'}
+          for f in glob.glob('results/*.trx'):
+              for r in ET.parse(f).getroot().iter('{%s}UnitTestResult' % ns['t']):
+                  if r.get('outcome') != 'Failed':
+                      continue
+                  msg = r.find('.//t:Message', ns)
+                  text = (msg.text if msg is not None else '').replace('\n', ' ')[:900]
+                  print('::error title=%s::%s' % (r.get('testName'), text))
       - name: Pack
         run: |
           dotnet pack src/Mori.Ros2Sharp -c Release --no-build -o artifacts
