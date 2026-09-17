@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Mori.Ros2Sharp.Tests</RootNamespace>
+    <!-- The generated demo types keep their sample namespace so the linked checks compile as-is. -->
+    <Ros2SharpNamespace>Ros2Messages</Ros2SharpNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Mori.Ros2Sharp\Mori.Ros2Sharp.csproj" />
+    <ProjectReference Include="..\..\src\Mori.Ros2Sharp.Generators\Mori.Ros2Sharp.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <CompilerVisibleProperty Include="Ros2SharpNamespace" />
+  </ItemGroup>
+
+  <!-- The samples' check suites are the tests: linked in, run under xunit, and still
+       runnable by hand through dds-probe and msg-demo. -->
+  <ItemGroup>
+    <Compile Include="..\..\samples\dds-probe\SelfTest.cs" Link="Suites\SelfTest.cs" />
+    <Compile Include="..\..\samples\dds-probe\Loopback.cs" Link="Suites\Loopback.cs" />
+    <Compile Include="..\..\samples\msg-demo\Checks.cs" Link="Suites\Checks.cs" />
+    <AdditionalFiles Include="..\..\samples\msg-demo\msgs\**\*.msg;..\..\samples\msg-demo\msgs\**\*.srv;..\..\samples\msg-demo\msgs\**\*.action" />
+  </ItemGroup>
+
+</Project>

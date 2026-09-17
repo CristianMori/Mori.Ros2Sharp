@@ -7,9 +7,13 @@ namespace DdsProbe;
 internal static class SelfTest
 {
     private static int _failures;
+    private static Action<string, bool>? _report;
 
-    public static int Run()
+    /// <summary>Runs every check; <paramref name="report"/> (name, passed) sees each one as it runs.</summary>
+    public static int Run(Action<string, bool>? report = null)
     {
+        _report = report;
+        _failures = 0;
         // CDR primitives and alignment: a double after a single byte pads to offset 8.
         var w = new CdrWriter(CdrEncapsulation.CdrLe);
         w.Write((byte)7);
@@ -233,5 +237,6 @@ internal static class SelfTest
     {
         Console.WriteLine($"{(ok ? "ok  " : "FAIL")}  {name}");
         if (!ok) _failures++;
+        _report?.Invoke(name, ok);
     }
 }

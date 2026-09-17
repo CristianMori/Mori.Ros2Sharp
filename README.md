@@ -20,7 +20,8 @@ package, `new Ros2Node(...)`, and the process shows up on the ROS graph like any
 | **Pub/sub** | Reliable and best-effort writers and readers: bounded history, in-order delivery, HEARTBEAT/ACKNACK retransmission, GAP handling, duplicate suppression; latched topics (transient-local durability) in both directions; large samples (images, point clouds) fragmented and reassembled with DATA_FRAG/NACK_FRAG recovery |
 | **Graph** | `ros_discovery_info` participation — the node appears in `ros2 node list`, its topics in `ros2 topic list` |
 | **Services** | Both sides: serve a service that `ros2 service call` can invoke, or call an existing ROS 2 service, with request/response correlation |
-| **Codegen** | Typed message and service classes generated from `.msg` and `.srv` files — a bundled build-time source generator and the `ros2msggen` CLI, with the common interface packages embedded |
+| **Actions** | Action client: send goals, receive feedback and status, await results, cancel — against any ROS 2 action server |
+| **Codegen** | Typed message, service, and action classes generated from `.msg`, `.srv`, and `.action` files — a bundled build-time source generator and the `ros2msggen` CLI, with the common interface packages embedded |
 
 Interoperability is validated live against unmodified ROS 2 Humble nodes (Fast DDS, the
 default middleware): `ros2 topic echo` prints what this library publishes, subscriptions
@@ -146,8 +147,25 @@ Trigger.Response reply = await client.CallAsync(new Trigger.Request(), TimeSpan.
 ```
 
 Typed publish and subscribe come as extension methods on the endpoints:
-`pub.Write(twist)` and `sub.OnMessage<Twist>(t => …)`. The same emitter is available as a
-CLI for offline generation:
+`pub.Write(twist)` and `sub.OnMessage<Twist>(t => …)`.
+
+`.action` files generate the goal, result, and feedback classes plus the derived send-goal,
+get-result, and feedback-message types, and the node provides an action client:
+
+```csharp
+using Ros2Messages.nav2_msgs;
+
+var client = node.CreateActionClient<Wait.Goal, Wait.Result, Wait.Feedback>("/wait", Wait.RosType);
+await client.WaitForServerAsync(TimeSpan.FromSeconds(10));
+
+var goal = new Wait.Goal();
+goal.Time.Sec = 2;
+var handle = await client.SendGoalAsync(goal, fb => Console.WriteLine($"{fb.TimeLeft.Sec}s left"));
+var (status, result) = await handle.GetResultAsync(TimeSpan.FromSeconds(30));
+// status == Ros2GoalStatus.Succeeded; handle.CancelAsync() ends a running goal
+```
+
+The same emitter is available as a CLI for offline generation:
 
 ```
 ros2msggen -o Generated -n MyMessages path/to/my_package
@@ -161,7 +179,8 @@ and locator control.
 
 `samples/msg-demo` checks the generated code offline (`msg-demo`) and live: `msg-demo live`
 publishes a generated Twist, `msg-demo serve` / `msg-demo call` run typed `std_srvs` servers
-and clients. `samples/dds-probe` exercises every layer against a live system:
+and clients, `msg-demo action` drives a `nav2_msgs/action/Wait` server. `samples/dds-probe`
+exercises every layer against a live system:
 
 ```
 dotnet run --project samples/dds-probe -- selftest      # offline wire-format checks
@@ -213,18 +232,23 @@ the same mechanism DDS initial-peer lists use.
   queue settings.
 - **Type descriptions**: endpoint matching is by topic and type name, which is how ROS 2
   Humble matches. The newer type-hash system is not implemented.
-- **.msg/.srv grammar**: constants, defaults, bounded strings/arrays, nested messages, and
-  the request/response split are supported; `wstring` fields, array default values, and
-  `.action` files are not.
+- **Interface grammar**: constants, defaults, bounded strings/arrays, nested messages, and
+  the `.srv`/`.action` splits are supported; `wstring` fields and array default values are
+  not. Actions have a client; an action server is not implemented.
 
-## Building
+## Building and testing
 
 .NET 8 SDK, no other prerequisites:
 
 ```
 dotnet build
-dotnet run --project samples/dds-probe -- selftest
+dotnet test tests/Mori.Ros2Sharp.Tests
 ```
+
+The tests run the wire-format self-test, the generated-code checks, and the in-process
+loopback (two nodes exchanging fragmented samples, with and without injected loss) under
+xunit; the same suites are runnable by hand through `dds-probe selftest`, `msg-demo`, and
+`dds-probe loopback`. CI runs them on every push.
 
 ## License
 

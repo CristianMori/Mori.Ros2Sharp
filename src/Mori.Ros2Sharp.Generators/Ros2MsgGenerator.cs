@@ -28,7 +28,8 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
         IncrementalValueProvider<ImmutableArray<(string FullType, string Text, string Path)>> msgFiles =
             context.AdditionalTextsProvider
                 .Where(static f => f.Path.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) ||
-                                   f.Path.EndsWith(".srv", StringComparison.OrdinalIgnoreCase))
+                                   f.Path.EndsWith(".srv", StringComparison.OrdinalIgnoreCase) ||
+                                   f.Path.EndsWith(".action", StringComparison.OrdinalIgnoreCase))
                 .Select(static (f, ct) => (FullTypeOf(f.Path), f.GetText(ct)?.ToString() ?? "", f.Path))
                 .Collect();
 
@@ -44,17 +45,24 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
 
             var messages = new Dictionary<string, string>();
             var services = new Dictionary<string, string>();
+            var actions = new Dictionary<string, string>();
             foreach ((string fullType, string text, string path) in files)
-                (path.EndsWith(".srv", StringComparison.OrdinalIgnoreCase) ? services : messages)[fullType] = text;
+            {
+                var table = path.EndsWith(".srv", StringComparison.OrdinalIgnoreCase) ? services
+                    : path.EndsWith(".action", StringComparison.OrdinalIgnoreCase) ? actions
+                    : messages;
+                table[fullType] = text;
+            }
 
             var catalog = new MsgCatalog(
                 fullType => messages.TryGetValue(fullType, out string? text) ? text : null,
-                fullType => services.TryGetValue(fullType, out string? text) ? text : null);
+                fullType => services.TryGetValue(fullType, out string? text) ? text : null,
+                fullType => actions.TryGetValue(fullType, out string? text) ? text : null);
 
             try
             {
                 foreach (KeyValuePair<string, string> generated in
-                         CSharpEmitter.EmitClosure(messages.Keys, services.Keys.Concat(EmbeddedMessages.ServiceTypes), catalog, ns, ""))
+                         CSharpEmitter.EmitClosure(messages.Keys, services.Keys.Concat(EmbeddedMessages.ServiceTypes), actions.Keys, catalog, ns, ""))
                     spc.AddSource(generated.Key.Replace('/', '.') + ".g.cs", generated.Value);
             }
             catch (Exception ex)
@@ -75,7 +83,8 @@ public sealed class Ros2MsgGenerator : IIncrementalGenerator
         {
             string leaf = Path.GetFileName(dir);
             if (string.Equals(leaf, "msg", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(leaf, "srv", StringComparison.OrdinalIgnoreCase))
+                string.Equals(leaf, "srv", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(leaf, "action", StringComparison.OrdinalIgnoreCase))
             {
                 string? parent = Path.GetDirectoryName(dir);
                 if (parent is not null) leaf = Path.GetFileName(parent);

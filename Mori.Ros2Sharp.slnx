@@ -8,4 +8,7 @@
     <Project Path="samples/dds-probe/dds-probe.csproj" />
     <Project Path="samples/msg-demo/msg-demo.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mori.Ros2Sharp.Tests/Mori.Ros2Sharp.Tests.csproj" />
+  </Folder>
 </Solution>

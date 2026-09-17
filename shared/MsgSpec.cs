@@ -43,6 +43,13 @@ public sealed class MsgField
     /// <summary>The default value text from the field line, when one was declared.</summary>
     public string? DefaultText;
 
+    /// <summary>
+    /// When set, the emitter uses this C# type for the field instead of deriving one from
+    /// <see cref="BaseType"/>. Synthesized action messages use it to point at the nested
+    /// Goal/Result/Feedback classes of their holder.
+    /// </summary>
+    public string? CsType;
+
     public bool IsBuiltin => MsgBuiltins.Contains(BaseType);
 }
 
@@ -152,15 +159,31 @@ public sealed class MsgCatalog
 {
     private readonly MsgTextResolver? _custom;
     private readonly MsgTextResolver? _customService;
+    private readonly MsgTextResolver? _customAction;
     private readonly Dictionary<string, MsgSpec> _specs = new Dictionary<string, MsgSpec>();
     private readonly Dictionary<string, SrvSpec> _services = new Dictionary<string, SrvSpec>();
+    private readonly Dictionary<string, ActionSpec> _actions = new Dictionary<string, ActionSpec>();
 
     /// <param name="custom">Supplies .msg text by <c>package/Name</c>, or null.</param>
     /// <param name="customService">Supplies .srv text by <c>package/Name</c>, or null.</param>
-    public MsgCatalog(MsgTextResolver? custom = null, MsgTextResolver? customService = null)
+    /// <param name="customAction">Supplies .action text by <c>package/Name</c>, or null.</param>
+    public MsgCatalog(MsgTextResolver? custom = null, MsgTextResolver? customService = null, MsgTextResolver? customAction = null)
     {
         _custom = custom;
         _customService = customService;
+        _customAction = customAction;
+    }
+
+    /// <summary>The action spec for <c>package/Name</c> (no actions are embedded).</summary>
+    public ActionSpec GetAction(string fullType)
+    {
+        if (_actions.TryGetValue(fullType, out ActionSpec? cached)) return cached;
+        string? text = _customAction?.Invoke(fullType);
+        if (text is null)
+            throw new KeyNotFoundException($"no .action definition available for '{fullType}'");
+        ActionSpec spec = ActionSpec.Parse(fullType, text);
+        _actions[fullType] = spec;
+        return spec;
     }
 
     public MsgSpec Get(string fullType)

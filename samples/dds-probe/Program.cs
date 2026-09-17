@@ -18,8 +18,8 @@ if (mode == "selftest")
     return DdsProbe.SelfTest.Run();
 if (mode == "loopback")
     return await DdsProbe.Loopback.Run(
-        args.Length > 1 ? int.Parse(args[1]) : 1_000_000,
-        args.Length > 2 ? int.Parse(args[2]) : 0);
+        size: args.Length > 1 ? int.Parse(args[1]) : 1_000_000,
+        lossPercent: args.Length > 2 ? int.Parse(args[2]) : 0);
 
 int argBase = mode == "discover" ? 0 : 1;
 int domain = args.Length > argBase ? int.Parse(args[argBase]) : 0;

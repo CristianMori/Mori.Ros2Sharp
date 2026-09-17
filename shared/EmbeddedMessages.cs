@@ -3,7 +3,8 @@ namespace Mori.Ros2Sharp.Msg;
 /// <summary>
 /// Bundled .msg texts for the common ROS 2 interface packages, taken verbatim from the
 /// Humble distribution: builtin_interfaces, std_msgs, geometry_msgs, sensor_msgs, nav_msgs,
-/// tf2_msgs — and the std_srvs .srv texts. Keys are <c>package/Name</c>.
+/// tf2_msgs, unique_identifier_msgs, action_msgs — and the std_srvs and action_msgs .srv
+/// texts. Keys are <c>package/Name</c>.
 /// </summary>
 public static class EmbeddedMessages
 {
@@ -13,11 +14,67 @@ public static class EmbeddedMessages
     /// </summary>
     public static readonly string[] ServiceTypes = { "std_srvs/Empty", "std_srvs/SetBool", "std_srvs/Trigger" };
 
-    /// <summary>The .srv text for <c>package/Name</c>, or null when not bundled (std_srvs only).</summary>
+    /// <summary>
+    /// What every action needs besides its own three messages: the goal-id and status types
+    /// and the cancel service, from unique_identifier_msgs and action_msgs. Emitted whenever
+    /// an action is.
+    /// </summary>
+    public static readonly string[] ActionSupportMessages = { "action_msgs/GoalStatusArray" };
+    public static readonly string[] ActionSupportServices = { "action_msgs/CancelGoal" };
+
+    /// <summary>The .srv text for <c>package/Name</c>, or null when not bundled (std_srvs and action_msgs).</summary>
     public static string? FindService(string fullType)
     {
         switch (fullType)
         {
+            case "action_msgs/CancelGoal": return @"
+# Cancel one or more goals with the following policy:
+#
+# - If the goal ID is zero and timestamp is zero, cancel all goals.
+# - If the goal ID is zero and timestamp is not zero, cancel all goals accepted
+#   at or before the timestamp.
+# - If the goal ID is not zero and timestamp is zero, cancel the goal with the
+#   given ID regardless of the time it was accepted.
+# - If the goal ID is not zero and timestamp is not zero, cancel the goal with
+#   the given ID and all goals accepted at or before the timestamp.
+
+# Goal info describing the goals to cancel, see above.
+GoalInfo goal_info
+---
+##
+## Return codes.
+##
+
+# Indicates the request was accepted without any errors.
+#
+# One or more goals have transitioned to the CANCELING state. The
+# goals_canceling list is not empty.
+int8 ERROR_NONE=0
+
+# Indicates the request was rejected.
+#
+# No goals have transitioned to the CANCELING state. The goals_canceling list is
+# empty.
+int8 ERROR_REJECTED=1
+
+# Indicates the requested goal ID does not exist.
+#
+# No goals have transitioned to the CANCELING state. The goals_canceling list is
+# empty.
+int8 ERROR_UNKNOWN_GOAL_ID=2
+
+# Indicates the goal is not cancelable because it is already in a terminal state.
+#
+# No goals have transitioned to the CANCELING state. The goals_canceling list is
+# empty.
+int8 ERROR_GOAL_TERMINATED=3
+
+# Return code, see above definitions.
+int8 return_code
+
+# Goals that accepted the cancel request.
+GoalInfo[] goals_canceling
+";
             case "std_srvs/Empty": return @"
 ---
 ";
@@ -41,6 +98,59 @@ string message # informational, e.g. for error messages
     {
         switch (fullType)
         {
+            case "unique_identifier_msgs/UUID": return @"
+# A universally unique identifier (UUID).
+#
+#  http://en.wikipedia.org/wiki/Universally_unique_identifier
+#  http://tools.ietf.org/html/rfc4122.html
+
+uint8[16] uuid
+";
+            case "action_msgs/GoalInfo": return @"
+# Goal ID
+unique_identifier_msgs/UUID goal_id
+
+# Time when the goal was accepted
+builtin_interfaces/Time stamp
+";
+            case "action_msgs/GoalStatus": return @"
+# An action goal can be in one of these states after it is accepted by an action
+# server.
+#
+# For more information, see http://design.ros2.org/articles/actions.html
+
+# Indicates status has not been properly set.
+int8 STATUS_UNKNOWN   = 0
+
+# The goal has been accepted and is awaiting execution.
+int8 STATUS_ACCEPTED  = 1
+
+# The goal is currently being executed by the action server.
+int8 STATUS_EXECUTING = 2
+
+# The client has requested that the goal be canceled and the action server has
+# accepted the cancel request.
+int8 STATUS_CANCELING = 3
+
+# The goal was achieved successfully by the action server.
+int8 STATUS_SUCCEEDED = 4
+
+# The goal was canceled after an external request from an action client.
+int8 STATUS_CANCELED  = 5
+
+# The goal was terminated by the action server without an external request.
+int8 STATUS_ABORTED   = 6
+
+# Goal info (contains ID and timestamp).
+GoalInfo goal_info
+
+# Action goal state-machine status.
+int8 status
+";
+            case "action_msgs/GoalStatusArray": return @"
+# An array of goal statuses.
+GoalStatus[] status_list
+";
             case "builtin_interfaces/Duration": return @"
 # Duration defines a period between two time points.
 # Messages of this datatype are of ROS Time following this design:

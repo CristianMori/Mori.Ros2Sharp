@@ -17,13 +17,20 @@ public static class CSharpEmitter
         IEnumerable<string> rootTypes, MsgCatalog catalog, string rootNamespace, string header) =>
         EmitClosure(rootTypes, Array.Empty<string>(), catalog, rootNamespace, header);
 
-    /// <summary>
-    /// Emits the given messages and services plus every message they reference. Keys are
-    /// <c>package/Name</c> for messages and <c>package/srv/Name</c> for services, so the two
-    /// never collide as file names.
-    /// </summary>
+    /// <summary>Emits messages and services plus every message they reference.</summary>
     public static List<KeyValuePair<string, string>> EmitClosure(
         IEnumerable<string> messageTypes, IEnumerable<string> serviceTypes,
+        MsgCatalog catalog, string rootNamespace, string header) =>
+        EmitClosure(messageTypes, serviceTypes, Array.Empty<string>(), catalog, rootNamespace, header);
+
+    /// <summary>
+    /// Emits the given messages, services, and actions plus every message they reference.
+    /// Keys are <c>package/Name</c> for messages, <c>package/srv/Name</c> for services, and
+    /// <c>package/action/Name</c> for actions, so they never collide as file names. Any
+    /// action brings the action_msgs support types with it.
+    /// </summary>
+    public static List<KeyValuePair<string, string>> EmitClosure(
+        IEnumerable<string> messageTypes, IEnumerable<string> serviceTypes, IEnumerable<string> actionTypes,
         MsgCatalog catalog, string rootNamespace, string header)
     {
         var pending = new Stack<string>();
@@ -32,14 +39,32 @@ public static class CSharpEmitter
             if (seen.Add(t)) pending.Push(t);
 
         var services = new List<string>();
-        foreach (string s in serviceTypes)
+        void AddService(string s)
         {
-            if (services.Contains(s)) continue;
+            if (services.Contains(s)) return;
             services.Add(s);
             SrvSpec srv = catalog.GetService(s);
             foreach (MsgField f in srv.Request.Fields.Concat(srv.Response.Fields))
                 if (!f.IsBuiltin && seen.Add(f.BaseType))
                     pending.Push(f.BaseType);
+        }
+        foreach (string s in serviceTypes) AddService(s);
+
+        var actions = new List<string>();
+        foreach (string a in actionTypes)
+        {
+            if (actions.Contains(a)) continue;
+            actions.Add(a);
+            ActionSpec act = catalog.GetAction(a);
+            foreach (MsgField f in act.Goal.Fields.Concat(act.Result.Fields).Concat(act.Feedback.Fields))
+                if (!f.IsBuiltin && seen.Add(f.BaseType))
+                    pending.Push(f.BaseType);
+        }
+        if (actions.Count > 0)
+        {
+            foreach (string t in new[] { "unique_identifier_msgs/UUID", "builtin_interfaces/Time" }.Concat(EmbeddedMessages.ActionSupportMessages))
+                if (seen.Add(t)) pending.Push(t);
+            foreach (string s in EmbeddedMessages.ActionSupportServices) AddService(s);
         }
 
         var closure = new List<string>();
@@ -53,6 +78,7 @@ public static class CSharpEmitter
         }
         closure.Sort(StringComparer.Ordinal);
         services.Sort(StringComparer.Ordinal);
+        actions.Sort(StringComparer.Ordinal);
 
         var output = new List<KeyValuePair<string, string>>();
         foreach (string type in closure)
@@ -63,7 +89,82 @@ public static class CSharpEmitter
             string key = s.Substring(0, slash) + "/srv/" + s.Substring(slash + 1);
             output.Add(new KeyValuePair<string, string>(key, EmitServiceFile(catalog.GetService(s), rootNamespace, header)));
         }
+        foreach (string a in actions)
+        {
+            int slash = a.IndexOf('/');
+            string key = a.Substring(0, slash) + "/action/" + a.Substring(slash + 1);
+            output.Add(new KeyValuePair<string, string>(key, EmitActionFile(catalog.GetAction(a), rootNamespace, header)));
+        }
         return output;
+    }
+
+    // An action is a static holder with Goal/Result/Feedback and the three derived types an
+    // action server exposes, synthesized here exactly as rosidl composes them: SendGoal
+    // (request: goal id + goal; response: accepted + stamp), GetResult (request: goal id;
+    // response: status + result), and FeedbackMessage (goal id + feedback).
+    private static string EmitActionFile(ActionSpec act, string rootNamespace, string header)
+    {
+        var sb = new StringBuilder();
+        FileHeader(sb, rootNamespace, act.Package, header);
+        string name = Identifier(act.ShortName);
+        string holder = $"global::{rootNamespace}.{Identifier(act.Package)}.{name}";
+        string ros = $"{act.Package}/action/{act.ShortName}";
+        string dds = $"{act.Package}::action::dds_::{act.ShortName}";
+
+        MsgField Ref(string baseType, string fieldName, string? csType = null) =>
+            new MsgField { RawType = baseType, BaseType = baseType, Name = fieldName, CsType = csType };
+        MsgSpec Synth(string suffix, params MsgField[] fields)
+        {
+            var s = new MsgSpec { FullType = $"{act.Package}/{act.ShortName}_{suffix}", Package = act.Package, ShortName = $"{act.ShortName}_{suffix}" };
+            s.Fields.AddRange(fields);
+            return s;
+        }
+        MsgField GoalId() => Ref("unique_identifier_msgs/UUID", "goal_id");
+
+        sb.AppendLine($"    /// <summary><c>{ros}</c>, generated from its .action definition.</summary>");
+        sb.AppendLine($"    public static class {name}");
+        sb.AppendLine("    {");
+        sb.AppendLine("        /// <summary>ROS 2 action type name.</summary>");
+        sb.AppendLine($"        public const string RosType = \"{ros}\";");
+        sb.AppendLine();
+        EmitMessageClass(sb, act.Goal, "Goal", $"{ros}_Goal", $"{dds}_Goal_", "The goal sent to the action server.", rootNamespace, "        ");
+        sb.AppendLine();
+        EmitMessageClass(sb, act.Result, "Result", $"{ros}_Result", $"{dds}_Result_", "The result returned when the goal ends.", rootNamespace, "        ");
+        sb.AppendLine();
+        EmitMessageClass(sb, act.Feedback, "Feedback", $"{ros}_Feedback", $"{dds}_Feedback_", "Progress published while the goal executes.", rootNamespace, "        ");
+
+        sb.AppendLine();
+        sb.AppendLine("        /// <summary>The send_goal service of the action.</summary>");
+        sb.AppendLine("        public static class SendGoal");
+        sb.AppendLine("        {");
+        sb.AppendLine($"            public const string RosType = \"{ros}_SendGoal\";");
+        sb.AppendLine();
+        EmitMessageClass(sb, Synth("SendGoal_Request", GoalId(), Ref($"{act.Package}/{act.ShortName}_Goal", "goal", holder + ".Goal")),
+            "Request", $"{ros}_SendGoal_Request", $"{dds}_SendGoal_Request_", "Goal id plus the goal.", rootNamespace, "            ");
+        sb.AppendLine();
+        EmitMessageClass(sb, Synth("SendGoal_Response", Ref("bool", "accepted"), Ref("builtin_interfaces/Time", "stamp")),
+            "Response", $"{ros}_SendGoal_Response", $"{dds}_SendGoal_Response_", "Whether the goal was accepted, and when.", rootNamespace, "            ");
+        sb.AppendLine("        }");
+
+        sb.AppendLine();
+        sb.AppendLine("        /// <summary>The get_result service of the action.</summary>");
+        sb.AppendLine("        public static class GetResult");
+        sb.AppendLine("        {");
+        sb.AppendLine($"            public const string RosType = \"{ros}_GetResult\";");
+        sb.AppendLine();
+        EmitMessageClass(sb, Synth("GetResult_Request", GoalId()),
+            "Request", $"{ros}_GetResult_Request", $"{dds}_GetResult_Request_", "The goal whose result is wanted.", rootNamespace, "            ");
+        sb.AppendLine();
+        EmitMessageClass(sb, Synth("GetResult_Response", Ref("int8", "status"), Ref($"{act.Package}/{act.ShortName}_Result", "result", holder + ".Result")),
+            "Response", $"{ros}_GetResult_Response", $"{dds}_GetResult_Response_", "Terminal status (action_msgs/GoalStatus values) plus the result.", rootNamespace, "            ");
+        sb.AppendLine("        }");
+
+        sb.AppendLine();
+        EmitMessageClass(sb, Synth("FeedbackMessage", GoalId(), Ref($"{act.Package}/{act.ShortName}_Feedback", "feedback", holder + ".Feedback")),
+            "FeedbackMessage", $"{ros}_FeedbackMessage", $"{dds}_FeedbackMessage_", "What the feedback topic carries: goal id plus feedback.", rootNamespace, "        ");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
     }
 
     private static void FileHeader(StringBuilder sb, string rootNamespace, string package, string header)
@@ -252,6 +353,7 @@ public static class CSharpEmitter
 
     private static string ElementCsType(MsgField f, string rootNamespace)
     {
+        if (f.CsType != null) return f.CsType;
         if (f.IsBuiltin) return BuiltinCsType(f.BaseType);
         int slash = f.BaseType.IndexOf('/');
         return $"global::{rootNamespace}.{Identifier(f.BaseType.Substring(0, slash))}.{Identifier(f.BaseType.Substring(slash + 1))}";

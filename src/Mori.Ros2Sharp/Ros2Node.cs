@@ -115,6 +115,16 @@ public sealed class Ros2Node : IDisposable
         where TResponse : IRos2Message, new() =>
         new(CreateClient(serviceName, serviceType));
 
+    /// <summary>
+    /// Creates an action client from generated types, e.g.
+    /// <c>CreateActionClient&lt;Wait.Goal, Wait.Result, Wait.Feedback&gt;("/wait", Wait.RosType)</c>.
+    /// </summary>
+    public Ros2ActionClient<TGoal, TResult, TFeedback> CreateActionClient<TGoal, TResult, TFeedback>(string actionName, string actionType)
+        where TGoal : IRos2Message
+        where TResult : IRos2Message, new()
+        where TFeedback : IRos2Message, new() =>
+        new(this, actionName, actionType);
+
     /// <summary>Creates a client for a service, e.g. ("/add_two_ints", "example_interfaces/srv/AddTwoInts").</summary>
     public Ros2Client CreateClient(string serviceName, string serviceType)
     {

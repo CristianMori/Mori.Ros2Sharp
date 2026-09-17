@@ -37,7 +37,7 @@ internal static class Loopback
         }
 
         public readonly SortedDictionary<long, PerSample> Samples = new();
-        public bool TrackSamples;
+        public bool TrackSamples { get; set; }
 
         /// <summary>Every NACK_FRAG and requesting ACKNACK that passed through, with a timestamp.</summary>
         public readonly List<string> Requests = new();
@@ -96,10 +96,18 @@ internal static class Loopback
             $"acknack {AckNacks} (requesting {AckNackMissing} samples), nack_frag {NackFrags} (requesting {NackFragMissing} fragments)";
     }
 
-    public static async Task<int> Run(int size, int lossPercent, int count = 10)
+    private static Action<string, bool>? _report;
+
+    /// <summary>Runs the whole exchange; <paramref name="report"/> (name, passed) sees each check as it runs.</summary>
+    public static async Task<int> Run(int size, int lossPercent, int count = 10, Action<string, bool>? report = null)
     {
+        _report = report;
         using var talker = new Ros2Node("loop_talker");
         using var listener = new Ros2Node("loop_listener");
+        // Unicast to the local slots as well: discovery then works where multicast does not
+        // loop back (some CI runners).
+        talker.AddPeer(System.Net.IPAddress.Loopback);
+        listener.AddPeer(System.Net.IPAddress.Loopback);
         var loss = new FragmentLoss(lossPercent);
         var listenerOut = new FragmentLoss(0);
         talker.Participant.DropOutgoing = loss.Drop;
@@ -268,6 +276,7 @@ internal static class Loopback
         Check("withdrawal: removed publisher unmatched from the subscription", goingSub2.MatchedWriterCount == 0 && listenerPubsLost == 1, ref failures);
 
         var third = new Ros2Node("loop_third");
+        third.AddPeer(System.Net.IPAddress.Loopback);
         var thirdPub = third.CreatePublisher("/going", "std_msgs/msg/String");
         third.Start();
         for (int i = 0; i < 200 && (goingSub2.MatchedWriterCount == 0 || thirdPub.MatchedReaderCount == 0); i++) await Task.Delay(50);
@@ -301,5 +310,6 @@ internal static class Loopback
     {
         Console.WriteLine($"{(ok ? "ok  " : "FAIL")}  {name}");
         if (!ok) failures++;
+        _report?.Invoke(name, ok);
     }
 }
