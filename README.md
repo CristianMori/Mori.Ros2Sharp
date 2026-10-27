@@ -1,5 +1,12 @@
 # Mori.Ros2Sharp
 
+[![NuGet](https://img.shields.io/nuget/v/Mori.Ros2Sharp)](https://www.nuget.org/packages/Mori.Ros2Sharp)
+[![Downloads](https://img.shields.io/nuget/dt/Mori.Ros2Sharp)](https://www.nuget.org/packages/Mori.Ros2Sharp)
+[![CI](https://github.com/CristianMori/Mori.Ros2Sharp/actions/workflows/ci.yml/badge.svg)](https://github.com/CristianMori/Mori.Ros2Sharp/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![ROS 2](https://img.shields.io/badge/ROS%202-Humble%20(Fast%20DDS)%20tested-22314E)](#scope-and-current-limits)
+[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%2010.0-512BD4)](https://www.nuget.org/packages/Mori.Ros2Sharp)
+
 A ROS 2 node in pure managed C# — the actual protocols, implemented directly on .NET sockets.
 No bridge process, no native DDS libraries, no ROS installation required on the machine
 running it.
@@ -9,6 +16,24 @@ OMG CDR serialization for message bodies, and a set of ROS conventions layered o
 and type naming, graph advertisement, service correlation). This library implements each of
 those layers itself, which is what makes the zero-dependency deployment possible: add the
 package, `new Ros2Node(...)`, and the process shows up on the ROS graph like any other node.
+
+## Install
+
+The package targets `net8.0` and `net10.0`. It has no NuGet dependencies.
+
+```bash
+dotnet add package Mori.Ros2Sharp
+dotnet tool install --global Mori.Ros2Sharp.MsgGen   # ros2msggen: typed msg/srv/action codegen
+```
+
+[`Mori.Ros2Sharp`](https://www.nuget.org/packages/Mori.Ros2Sharp) is the node. The same package
+ships the build-time source generator: `.msg`, `.srv`, and `.action` files listed as
+`AdditionalFiles` become typed classes at build time.
+
+[`Mori.Ros2Sharp.MsgGen`](https://www.nuget.org/packages/Mori.Ros2Sharp.MsgGen) is the
+`ros2msggen` global tool (`PackAsTool`, command name `ros2msggen`) for generating those
+classes offline — code review, non-SDK builds, or checking generated sources into a
+repository. An SDK-style project that already references `Mori.Ros2Sharp` can skip the tool.
 
 ## What works today
 
@@ -59,6 +84,17 @@ sub.DataReceived += (writer, payload, timestamp) =>
 };
 node.Start();
 ```
+
+With either process running, a ROS 2 Humble shell on the same domain sees it as a normal
+node. `ros2 node list` includes the name passed to `Ros2Node`, and `ros2 topic echo /chatter`
+prints the strings the talker writes:
+
+```bash
+ros2 node list
+ros2 topic echo /chatter
+```
+
+<!-- TODO: add a screenshot of `ros2 node list` and `ros2 topic echo /chatter` showing the C# node. -->
 
 Discovery is symmetric but not simultaneous, so the first message of a stream can be
 written before the other side has finished matching, and a volatile subscription then never
@@ -112,8 +148,10 @@ Message bodies can be hand-serialized with `CdrWriter`/`CdrReader` as above — 
 declaration order, primitives aligned automatically — or generated. Add `.msg` files to your
 project as `AdditionalFiles` and the bundled source generator turns them into typed classes at
 build time, dependencies included (the common interface packages — `builtin_interfaces`,
-`std_msgs`, `geometry_msgs`, `sensor_msgs`, `nav_msgs`, `tf2_msgs` — are embedded, so
-referencing `std_msgs/Header` just works):
+`std_msgs`, `geometry_msgs`, `sensor_msgs`, `nav_msgs`, `tf2_msgs`, `unique_identifier_msgs`,
+and `action_msgs` — are embedded, so referencing `std_msgs/Header` just works). The root
+namespace defaults to `Ros2Messages`; set the `Ros2SharpNamespace` MSBuild property to change
+it. `.srv` and `.action` files are picked up the same way.
 
 ```xml
 <ItemGroup>
@@ -238,7 +276,9 @@ the same mechanism DDS initial-peer lists use.
 
 ## Building and testing
 
-.NET 8 SDK, no other prerequisites:
+The library and `ros2msggen` multi-target `net8.0` and `net10.0`. The samples and tests
+target `net8.0`; the source generator targets `netstandard2.0`. CI installs the .NET 8 and
+.NET 10 SDKs. There is no ROS install and no native dependency:
 
 ```
 dotnet build
@@ -249,7 +289,18 @@ The tests run the wire-format self-test, the generated-code checks, and the in-p
 loopback (two nodes exchanging fragmented samples, with and without injected loss) under
 xunit; the same suites are runnable by hand through `dds-probe selftest`, `msg-demo`, and
 `dds-probe loopback`. The in-process nodes use ROS domain 200, so the tests neither see nor
-disturb a ROS 2 system on the same network. CI runs them on every push.
+disturb a ROS 2 system on the same network. CI (`.github/workflows/ci.yml`) runs build, test,
+and pack on pushes to `main` and on pull requests.
+
+## Related projects
+
+Part of a family of open-source robotics / industrial-automation libraries by @CristianMori:
+
+- **EtherNet/IP + CIP Safety:** [Python](https://github.com/CristianMori/EthernetIpPython) · [C#](https://github.com/CristianMori/EthernetIpSharp) · [Rust](https://github.com/CristianMori/EthernetIpRust) · [C++](https://github.com/CristianMori/EthernetIpCpp)
+- **PLC tooling:** [MoriFixPlc](https://github.com/CristianMori/MoriFixPlc) (portable PLC HAL) · [EscaFlow](https://github.com/CristianMori/Mori.EscaFlow) (PLC transpiler)
+- **ROS in pure C#:** [Mori.RosSharp](https://github.com/CristianMori/Mori.RosSharp) (ROS 1) · [Mori.Ros2Sharp](https://github.com/CristianMori/Mori.Ros2Sharp) (ROS 2)
+- **Simulation & vision:** [GemelliStudio](https://github.com/CristianMori/GemelliStudio) · [LocateAnythingSharp](https://github.com/CristianMori/LocateAnythingSharp) · [Mori.SkyScope](https://github.com/CristianMori/Mori.SkyScope)
+- **AI agents:** [Deckhand](https://github.com/CristianMori/DeckHand)
 
 ## License
 
